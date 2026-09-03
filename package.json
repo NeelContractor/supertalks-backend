@@ -1,0 +1,36 @@
+{
+  "name": "backend",
+  "module": "src/index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bcrypt": "^6.0.0",
+    "@types/bun": "latest",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/swagger-jsdoc": "^6.0.4",
+    "@types/swagger-ui-express": "^4.1.8",
+    "prisma": "7"
+  },
+  "peerDependencies": {
+    "typescript": "^7"
+  },
+  "dependencies": {
+    "@prisma/adapter-pg": "^7.10.0",
+    "@prisma/client": "7",
+    "bcrypt": "^6.0.0",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "jose": "^6.2.10",
+    "pg": "^8.23.0",
+    "swagger-jsdoc": "^6.3.0",
+    "swagger-ui-express": "^5.0.1",
+    "zod": "^4.5.4"
+  },
+  "scripts": {
+    "dev": "bun run src/server.ts",
+    "dev:testing": "bun run src/testing.ts",
+    "test": "bun test",
+    "seed": "bun run scripts/seed.ts"
+  }
+}

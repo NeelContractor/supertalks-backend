@@ -1,0 +1,266 @@
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum UserRole {
+  Client
+  Astrologer
+  Admin
+
+  @@map("user_role")
+}
+
+enum AstrologerStatus {
+  Pending
+  Approved
+  Rejected
+  Suspended
+
+  @@map("astrologer_status")
+}
+
+enum QuestionStatus {
+  PendingPayment
+  Queued
+  Answered
+  Rejected
+  Refunded
+
+  @@map("question_status")
+}
+
+enum BookingStatus {
+  PendingPayment
+  Confirmed
+  Rescheduled
+  Completed
+  CancelledByClient
+  CancelledByAstrologer
+  NoShowClient
+  NoShowAstrologer
+
+  @@map("booking_status")
+}
+
+enum PaymentStatus {
+  Created
+  Succeeded
+  Failed
+  Refunded
+  PartiallyRefunded
+
+  @@map("payment_status")
+}
+
+enum PaymentFor {
+  Question
+  Booking
+
+  @@map("payment_for")
+}
+
+enum OauthProvider {
+  Google
+
+  @@map("oauth_provider")
+}
+
+model User {
+  id              String   @id @default(uuid()) @db.Uuid
+  name            String
+  email           String   @unique
+  emailVerified   Boolean  @default(false) @map("email_verified")
+  mobile          String?
+  mobileVerified  Boolean  @default(false) @map("mobile_verified")
+  username        String   @unique
+  passwordHash    String?  @map("password_hash")
+  profileImageUrl String?  @map("profile_image_url")
+  role            UserRole @default(Client)
+  isActive        Boolean  @default(true) @map("is_active")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  astrologerProfile AstrologerProfile?
+  oauthAccounts     OauthAccount[]
+  refreshTokens     RefreshToken[]
+  bookingsAsClient  Booking[]           @relation("ClientBookings")
+  questionsAsClient Question[]          @relation("ClientQuestions")
+  payments          Payment[]
+
+  @@map("users")
+}
+
+model OauthAccount {
+  id                String        @id @default(uuid()) @db.Uuid
+  userId            String        @map("user_id") @db.Uuid
+  provider          OauthProvider
+  providerAccountId String        @map("provider_account_id")
+  createdAt         DateTime      @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([provider, providerAccountId])
+  @@map("oauth_accounts")
+}
+
+model RefreshToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @map("token_hash")
+  userAgent String?   @map("user_agent")
+  ip        String?
+  expiresAt DateTime  @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("refresh_tokens")
+}
+
+model WebsiteTemplate {
+  id              String   @id @default(uuid()) @db.Uuid
+  name            String
+  previewImageUrl String?  @map("preview_image_url")
+  schema          Json
+  isActive        Boolean  @default(true) @map("is_active")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  astrologerProfiles AstrologerProfile[]
+
+  @@map("website_templates")
+}
+
+model AstrologerProfile {
+  id                      String           @id @default(uuid()) @db.Uuid
+  userId                  String           @unique @map("user_id") @db.Uuid
+  slug                    String           @unique
+  status                  AstrologerStatus @default(Pending)
+  bio                     String?
+  specializations         String[]
+  languages               String[]
+  experienceYears         Int?             @map("experience_years")
+  timezone                String           @default("Asia/Kolkata")
+  questionPricePaise      Int              @default(0) @map("question_price_paise")
+  callPricePerSlotPaise   Int              @default(0) @map("call_price_per_slot_paise")
+  slotDurationMinutes     Int              @default(30) @map("slot_duration_minutes")
+  bufferMinutes           Int              @default(5) @map("buffer_minutes")
+  cancellationWindowHours Int              @default(6) @map("cancellation_window_hours")
+  ratingAvgX100           Int              @default(0) @map("rating_avg_x100")
+  ratingCount             Int              @default(0) @map("rating_count")
+  templateId              String?          @map("template_id") @db.Uuid
+  templateData            Json             @default("{}") @map("template_data")
+  isAcceptingQuestions    Boolean          @default(true) @map("is_accepting_questions")
+  isAcceptingBookings     Boolean          @default(true) @map("is_accepting_bookings")
+  createdAt               DateTime         @default(now()) @map("created_at")
+  updatedAt               DateTime         @updatedAt @map("updated_at")
+
+  user                    User                     @relation(fields: [userId], references: [id])
+  template                WebsiteTemplate?         @relation(fields: [templateId], references: [id])
+  availabilityRules       AvailabilityRule[]
+  availabilityExceptions  AvailabilityException[]
+  bookings                Booking[]                @relation("AstrologerBookings")
+  questions               Question[]               @relation("AstrologerQuestions")
+
+  @@map("astrologer_profiles")
+}
+
+model AvailabilityRule {
+  id           String   @id @default(uuid()) @db.Uuid
+  astrologerId String   @map("astrologer_id") @db.Uuid
+  dayOfWeek    Int      @map("day_of_week")
+  startTime    DateTime @map("start_time") @db.Time
+  endTime      DateTime @map("end_time") @db.Time
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  astrologer AstrologerProfile @relation(fields: [astrologerId], references: [id])
+
+  @@map("availability_rules")
+}
+
+model AvailabilityException {
+  id           String    @id @default(uuid()) @db.Uuid
+  astrologerId String    @map("astrologer_id") @db.Uuid
+  date         DateTime  @db.Date
+  startTime    DateTime? @map("start_time") @db.Time
+  endTime      DateTime? @map("end_time") @db.Time
+  isBlocked    Boolean   @default(true) @map("is_blocked")
+  reason       String?
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  astrologer AstrologerProfile @relation(fields: [astrologerId], references: [id])
+
+  @@map("availability_exceptions")
+}
+
+model Booking {
+  id                 String        @id @default(uuid()) @db.Uuid
+  clientId           String        @map("client_id") @db.Uuid
+  astrologerId       String        @map("astrologer_id") @db.Uuid
+  startAt            DateTime      @map("start_at")
+  endAt              DateTime      @map("end_at")
+  status             BookingStatus @default(PendingPayment)
+  pricePaise         Int           @map("price_paise")
+  paymentId          String?       @map("payment_id") @db.Uuid
+  meetingLink        String?       @map("meeting_link")
+  clientNote         String?       @map("client_note")
+  cancelledBy        String?       @map("cancelled_by")
+  cancellationReason String?       @map("cancellation_reason")
+  createdAt          DateTime      @default(now()) @map("created_at")
+  updatedAt          DateTime      @updatedAt @map("updated_at")
+
+  client     User              @relation("ClientBookings", fields: [clientId], references: [id])
+  astrologer AstrologerProfile @relation("AstrologerBookings", fields: [astrologerId], references: [id])
+  payment    Payment?          @relation(fields: [paymentId], references: [id])
+
+  @@map("bookings")
+}
+
+model Question {
+  id              String         @id @default(uuid()) @db.Uuid
+  clientId        String         @map("client_id") @db.Uuid
+  astrologerId    String         @map("astrologer_id") @db.Uuid
+  questionText    String         @map("question_text")
+  category        String?
+  status          QuestionStatus @default(PendingPayment)
+  pricePaise      Int            @map("price_paise")
+  paymentId       String?        @map("payment_id") @db.Uuid
+  answerText      String?        @map("answer_text")
+  answeredAt      DateTime?      @map("answered_at")
+  rejectionReason String?        @map("rejection_reason")
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+
+  client     User              @relation("ClientQuestions", fields: [clientId], references: [id])
+  astrologer AstrologerProfile @relation("AstrologerQuestions", fields: [astrologerId], references: [id])
+  payment    Payment?          @relation(fields: [paymentId], references: [id])
+
+  @@map("questions")
+}
+
+model Payment {
+  id                String        @id @default(uuid()) @db.Uuid
+  payerId           String        @map("payer_id") @db.Uuid
+  payeeAstrologerId String?       @map("payee_astrologer_id") @db.Uuid
+  amountPaise       Int           @map("amount_paise")
+  currency          String        @default("INR")
+  provider          String
+  providerPaymentId String?       @map("provider_payment_id")
+  providerOrderId   String?       @map("provider_order_id")
+  status            PaymentStatus @default(Created)
+  purpose           PaymentFor
+  rawWebhookPayload Json?         @map("raw_webhook_payload")
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
+
+  payer     User       @relation(fields: [payerId], references: [id])
+  bookings  Booking[]
+  questions Question[]
+
+  @@map("payments")
+}
