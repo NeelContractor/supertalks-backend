@@ -15,6 +15,12 @@ import {
   createAvailabilityRuleSchema,
   createExceptionSchema,
 } from "../types/scheduling";
+import {
+  buildSite,
+  getDefaultRenderableTemplate,
+  getTemplateSchema,
+  sanitizeTemplateData,
+} from "../lib/site";
 
 const router = Router();
 
@@ -743,7 +749,12 @@ router.patch("/me/template-data", requireAuth, async (req, res) => {
     const userId = req.user!.id;
     const profile = await db.astrologerProfile.findUnique({
       where: { userId },
-      select: { id: true },
+      select: {
+        id: true,
+        templateId: true,
+        templateData: true,
+        slug: true,
+      },
     });
     if (!profile) {
       const user = await getCurrentUser(userId);
@@ -751,26 +762,146 @@ router.patch("/me/template-data", requireAuth, async (req, res) => {
       return res.status(404).json({ error: "Astrologer profile not found" });
     }
 
-    if (parsed.data.templateId) {
+    let templateId = parsed.data.templateId ?? profile.templateId;
+    if (templateId) {
       const template = await db.websiteTemplate.findUnique({
-        where: { id: parsed.data.templateId },
+        where: { id: templateId },
       });
       if (!template) {
         return res.status(400).json({ error: "Template not found" });
       }
     }
 
+    const template = templateId
+      ? await db.websiteTemplate.findUnique({ where: { id: templateId } })
+      : await getDefaultRenderableTemplate();
+    if (!template) {
+      return res.status(500).json({ error: "No website template available" });
+    }
+
+    const schema = getTemplateSchema(template);
+    const sanitized = sanitizeTemplateData(schema, parsed.data.templateData ?? {});
+
     const updated = await db.astrologerProfile.update({
       where: { userId },
       data: {
-        templateId: parsed.data.templateId,
-        templateData: parsed.data.templateData,
+        templateId,
+        templateData: sanitized as never,
+      },
+      select: {
+        id: true,
+        templateId: true,
+        templateData: true,
+        slug: true,
       },
     });
 
-    return res.json({ profile: updated });
+    const siteResult = await buildSite(updated);
+    return res.json({ profile: updated, site: siteResult.site });
   } catch (err) {
     console.error("Update template data error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/**
+ * @openapi
+ * /astrologers/me/site:
+ *   get:
+ *     tags: [Astrologers]
+ *     summary: Get own customised website (template schema + merged site doc)
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Template schema and fully-merged site document
+ *       401: { description: Unauthorized }
+ *       403: { description: User is not an astrologer }
+ *       404: { description: No astrologer profile found }
+ *       500: { description: Internal server error }
+ */
+router.get("/me/site", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user!.id;
+    const profile = await db.astrologerProfile.findUnique({
+      where: { userId },
+      select: {
+        slug: true,
+        templateId: true,
+        templateData: true,
+        user: { select: { name: true, username: true, profileImageUrl: true } },
+      },
+    });
+    if (!profile) {
+      const user = await getCurrentUser(userId);
+      if (!user) return res.status(403).json({ error: "User is not an astrologer" });
+      return res.status(404).json({ error: "Astrologer profile not found" });
+    }
+
+    const { template, schema, site } = await buildSite(profile);
+    return res.json({
+      slug: profile.slug,
+      astrologerName: profile.user.name,
+      templateId: template.id,
+      templateName: template.name,
+      templatePreviewImageUrl: template.previewImageUrl,
+      schema,
+      site,
+    });
+  } catch (err) {
+    console.error("Get own site error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/**
+ * @openapi
+ * /astrologers/{slug}/site:
+ *   get:
+ *     tags: [Astrologers]
+ *     summary: Get a public astrologer's site (template schema + merged site doc) for rendering
+ *     parameters:
+ *       - in: path
+ *         name: slug
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Template schema and fully-merged site document
+ *       404: { description: Astrologer not found }
+ *       500: { description: Internal server error }
+ */
+router.get("/:slug/site", async (req, res) => {
+  try {
+    const slug = paramString(req.params.slug);
+    if (!slug) return res.status(404).json({ error: "Astrologer not found" });
+
+    const profile = await db.astrologerProfile.findUnique({
+      where: { slug },
+      select: {
+        slug: true,
+        status: true,
+        templateId: true,
+        templateData: true,
+        user: { select: { name: true, username: true, profileImageUrl: true } },
+      },
+    });
+    if (!profile) {
+      return res.status(404).json({ error: "Astrologer not found" });
+    }
+
+    const { template, schema, site } = await buildSite(profile);
+    return res.json({
+      slug: profile.slug,
+      astrologerName: profile.user.name,
+      templateId: template.id,
+      templateName: template.name,
+      templatePreviewImageUrl: template.previewImageUrl,
+      schema,
+      site,
+    });
+  } catch (err) {
+    console.error("Get public site error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });
