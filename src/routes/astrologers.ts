@@ -14,6 +14,7 @@ import {
 import {
   createAvailabilityRuleSchema,
   createExceptionSchema,
+  bulkAvailabilityRulesSchema,
 } from "../types/scheduling";
 import {
   buildSite,
@@ -21,6 +22,7 @@ import {
   getTemplateSchema,
   sanitizeTemplateData,
 } from "../lib/site";
+import { openSlotsForRules, timeToMinutes, windowsOverlap } from "../lib/scheduling";
 
 const router = Router();
 
@@ -416,18 +418,163 @@ router.post("/me/availability-rules", requireAuth, async (req, res) => {
     }
 
     const { dayOfWeek, startTime, endTime } = parsed.data;
+    const start = new Date(`1970-01-01T${startTime}`);
+    const end = new Date(`1970-01-01T${endTime}`);
+
+    const existing = await db.availabilityRule.findMany({
+      where: { astrologerId: profile.id, dayOfWeek },
+      select: { startTime: true, endTime: true },
+    });
+    if (
+      existing.some((r) =>
+        windowsOverlap(
+          timeToMinutes(start),
+          timeToMinutes(end),
+          timeToMinutes(r.startTime),
+          timeToMinutes(r.endTime)
+        )
+      )
+    ) {
+      return res
+        .status(400)
+        .json({ error: "Availability rule overlaps an existing rule for this day" });
+    }
+
     const rule = await db.availabilityRule.create({
       data: {
         astrologerId: profile.id,
         dayOfWeek,
-        startTime: new Date(`1970-01-01T${startTime}`),
-        endTime: new Date(`1970-01-01T${endTime}`),
+        startTime: start,
+        endTime: end,
       },
     });
 
     return res.status(201).json({ rule });
   } catch (err) {
     console.error("Create availability rule error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/**
+ * @openapi
+ * /astrologers/me/availability-rules/bulk:
+ *   post:
+ *     tags: [Astrologers]
+ *     summary: Replace weekly availability rules for the given days with the given windows
+ *     description: Applied as one action - creates/updates rules to match the windows and removes any rule on the selected days not in the windows.
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [daysOfWeek, windows]
+ *             properties:
+ *               daysOfWeek: { type: array, items: { type: integer, minimum: 0, maximum: 6 } }
+ *               windows:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required: [startTime, endTime]
+ *                   properties:
+ *                     startTime: { type: string, example: "09:00" }
+ *                     endTime: { type: string, example: "13:00" }
+ *     responses:
+ *       200: { description: Rules replaced }
+ *       400: { description: Validation error }
+ *       401: { description: Unauthorized }
+ *       403: { description: User is not an astrologer }
+ *       404: { description: No astrologer profile found }
+ *       500: { description: Internal server error }
+ */
+router.post("/me/availability-rules/bulk", requireAuth, async (req, res) => {
+  try {
+    const parsed = bulkAvailabilityRulesSchema.safeParse(req.body);
+    if (!parsed.success) return sendValidationError(res, parsed.error);
+
+    const userId = req.user!.id;
+    const profile = await db.astrologerProfile.findUnique({
+      where: { userId },
+      select: { id: true },
+    });
+    if (!profile) {
+      const user = await getCurrentUser(userId);
+      if (!user) return res.status(403).json({ error: "User is not an astrologer" });
+      return res.status(404).json({ error: "Astrologer profile not found" });
+    }
+
+    const { daysOfWeek, windows } = parsed.data;
+    const windowsForDay = (startTime: string, endTime: string) => ({
+      startTime: new Date(`1970-01-01T${startTime}`),
+      endTime: new Date(`1970-01-01T${endTime}`),
+    });
+
+    for (const day of daysOfWeek) {
+      const existing = await db.availabilityRule.findMany({
+        where: { astrologerId: profile.id, dayOfWeek: day },
+        select: { id: true, startTime: true, endTime: true },
+      });
+
+      const windowsToUse = windows.map((w) => windowsForDay(w.startTime, w.endTime));
+      const matches = new Set<string>();
+      const kept: { id: string; startTime: Date; endTime: Date }[] = [];
+
+      for (const rule of existing) {
+        const matchIdx = windowsToUse.findIndex(
+          (w) =>
+            timeToMinutes(w.startTime) === timeToMinutes(rule.startTime) &&
+            timeToMinutes(w.endTime) === timeToMinutes(rule.endTime)
+        );
+        const match = matchIdx >= 0 ? windowsToUse[matchIdx] : undefined;
+        if (match) {
+          matches.add(rule.id);
+          kept.push({ id: rule.id, startTime: match.startTime, endTime: match.endTime });
+          windowsToUse.splice(matchIdx, 1);
+        }
+      }
+
+      if (windowsToUse.length > 0) {
+        await db.$transaction(
+          windowsToUse.map((w) =>
+            db.availabilityRule.create({
+              data: {
+                astrologerId: profile.id,
+                dayOfWeek: day,
+                startTime: w.startTime,
+                endTime: w.endTime,
+              },
+            })
+          )
+        );
+      }
+      if (kept.length > 0) {
+        await db.$transaction(
+          kept.map((r) =>
+            db.availabilityRule.update({
+              where: { id: r.id },
+              data: { dayOfWeek: day, startTime: r.startTime, endTime: r.endTime },
+            })
+          )
+        );
+      }
+      const toDelete = existing.filter((r) => !matches.has(r.id));
+      if (toDelete.length > 0) {
+        await db.availabilityRule.deleteMany({
+          where: { id: { in: toDelete.map((r) => r.id) } },
+        });
+      }
+    }
+
+    const rules = await db.availabilityRule.findMany({
+      where: { astrologerId: profile.id },
+      orderBy: { dayOfWeek: "asc" },
+    });
+    return res.json({ rules });
+  } catch (err) {
+    console.error("Bulk availability rules error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -497,6 +644,34 @@ router.patch(
       const data: Record<string, unknown> = { ...parsed.data };
       if (data.startTime) data.startTime = new Date(`1970-01-01T${data.startTime}`);
       if (data.endTime) data.endTime = new Date(`1970-01-01T${data.endTime}`);
+
+      const dayOfWeek =
+        (parsed.data.dayOfWeek as number | undefined) ?? existing.dayOfWeek;
+      const newStart = (parsed.data.startTime
+        ? new Date(`1970-01-01T${parsed.data.startTime}`)
+        : existing.startTime) as Date;
+      const newEnd = (parsed.data.endTime
+        ? new Date(`1970-01-01T${parsed.data.endTime}`)
+        : existing.endTime) as Date;
+
+      const others = await db.availabilityRule.findMany({
+        where: { astrologerId: profile.id, dayOfWeek, id: { not: existing.id } },
+        select: { startTime: true, endTime: true },
+      });
+      if (
+        others.some((r) =>
+          windowsOverlap(
+            timeToMinutes(newStart),
+            timeToMinutes(newEnd),
+            timeToMinutes(r.startTime),
+            timeToMinutes(r.endTime)
+          )
+        )
+      ) {
+        return res
+          .status(400)
+          .json({ error: "Availability rule overlaps an existing rule for this day" });
+      }
 
       const rule = await db.availabilityRule.update({
         where: { id: existing.id },
@@ -649,10 +824,22 @@ router.post("/me/exceptions", requireAuth, async (req, res) => {
     }
 
     const { date, isBlocked, startTime, endTime, reason } = parsed.data;
-    const exception = await db.availabilityException.create({
-      data: {
+    const exception = await db.availabilityException.upsert({
+      where: {
+        astrologerId_date: {
+          astrologerId: profile.id,
+          date: new Date(`${date}T00:00:00`),
+        },
+      },
+      create: {
         astrologerId: profile.id,
         date: new Date(`${date}T00:00:00`),
+        isBlocked,
+        startTime: startTime ? new Date(`1970-01-01T${startTime}`) : null,
+        endTime: endTime ? new Date(`1970-01-01T${endTime}`) : null,
+        reason,
+      },
+      update: {
         isBlocked,
         startTime: startTime ? new Date(`1970-01-01T${startTime}`) : null,
         endTime: endTime ? new Date(`1970-01-01T${endTime}`) : null,
@@ -879,10 +1066,16 @@ router.get("/:slug/site", async (req, res) => {
     const profile = await db.astrologerProfile.findUnique({
       where: { slug },
       select: {
+        id: true,
         slug: true,
         status: true,
         templateId: true,
         templateData: true,
+        questionPricePaise: true,
+        callPricePerSlotPaise: true,
+        slotDurationMinutes: true,
+        isAcceptingQuestions: true,
+        isAcceptingBookings: true,
         user: { select: { name: true, username: true, profileImageUrl: true } },
       },
     });
@@ -893,12 +1086,18 @@ router.get("/:slug/site", async (req, res) => {
     const { template, schema, site } = await buildSite(profile);
     return res.json({
       slug: profile.slug,
+      astrologerId: profile.id,
       astrologerName: profile.user.name,
       templateId: template.id,
       templateName: template.name,
       templatePreviewImageUrl: template.previewImageUrl,
       schema,
       site,
+      questionPricePaise: profile.questionPricePaise,
+      callPricePerSlotPaise: profile.callPricePerSlotPaise,
+      slotDurationMinutes: profile.slotDurationMinutes,
+      isAcceptingQuestions: profile.isAcceptingQuestions,
+      isAcceptingBookings: profile.isAcceptingBookings,
     });
   } catch (err) {
     console.error("Get public site error:", err);
@@ -960,46 +1159,12 @@ router.get("/:slug/slots", async (req, res) => {
       return res.status(404).json({ error: "Astrologer not found" });
     }
 
-    const target = new Date(`${date}T00:00:00Z`);
-    const targetDay = target.getUTCDay();
-
-    const blockedException = profile.availabilityExceptions.find(
-      (e) => e.isBlocked
+    const slots = openSlotsForRules(
+      profile,
+      profile.availabilityRules,
+      profile.availabilityExceptions,
+      date
     );
-    if (blockedException) {
-      return res.json({ date, slots: [] });
-    }
-
-    const exception = profile.availabilityExceptions.find((e) => !e.isBlocked);
-    const dayRules = exception
-      ? [
-          {
-            startTime: exception.startTime ?? new Date(`1970-01-01T00:00:00Z`),
-            endTime: exception.endTime ?? new Date(`1970-01-01T23:59:00Z`),
-          },
-        ]
-      : profile.availabilityRules.filter((r) => r.dayOfWeek === targetDay);
-
-    const slotDuration = profile.slotDurationMinutes;
-    const buffer = profile.bufferMinutes;
-    const slots: { startAt: string; endAt: string }[] = [];
-
-    for (const rule of dayRules) {
-      const start = new Date(target);
-      start.setUTCHours(rule.startTime.getUTCHours(), rule.startTime.getUTCMinutes(), 0, 0);
-      const end = new Date(target);
-      end.setUTCHours(rule.endTime.getUTCHours(), rule.endTime.getUTCMinutes(), 0, 0);
-
-      let slotStart = new Date(start);
-      while (slotStart.getTime() + slotDuration * 60000 <= end.getTime()) {
-        const slotEnd = new Date(slotStart.getTime() + slotDuration * 60000);
-        slots.push({
-          startAt: slotStart.toISOString(),
-          endAt: slotEnd.toISOString(),
-        });
-        slotStart = new Date(slotEnd.getTime() + buffer * 60000);
-      }
-    }
 
     return res.json({ date, slots });
   } catch (err) {

@@ -6,6 +6,12 @@ import { randomUUID, randomBytes } from "crypto";
 const server = app.listen(0);
 const base = `http://localhost:${(server.address() as { port: number }).port}`;
 
+// Server startup can lag port assignment under parallel load; wait until the
+// listener is actually accepting before issuing requests against it.
+const ready = new Promise<void>((resolve) => {
+  server.on("listening", () => resolve());
+});
+
 export function getBaseUrl() {
   return base;
 }
@@ -28,6 +34,7 @@ export async function registerUser(body: {
   username: string;
   password: string;
 }) {
+  await ready;
   return fetch(`${base}/auth/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -36,6 +43,7 @@ export async function registerUser(body: {
 }
 
 export async function signinUser(identifier: string, password: string) {
+  await ready;
   return fetch(`${base}/auth/signin`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -48,6 +56,7 @@ export async function api(
   path: string,
   opts: { token?: string; body?: unknown } = {}
 ) {
+  await ready;
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (opts.token) headers.Authorization = `Bearer ${opts.token}`;
 

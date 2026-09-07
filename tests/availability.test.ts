@@ -20,6 +20,7 @@ interface RuleBody {
 }
 interface Exception {
   id: string;
+  date: string;
   reason?: string;
 }
 interface ExceptionsBody {
@@ -130,4 +131,89 @@ test("exceptions create and list", async () => {
   });
   const body = await json<ExceptionsBody>(list);
   expect(body.exceptions.some((e) => e.reason === "Holiday")).toBe(true);
+});
+
+test("a second exception for the same date replaces the first (no clash)", async () => {
+  const first = await api("POST", "/astrologers/me/exceptions", {
+    token: astro.accessToken,
+    body: { date: "2026-12-26", isBlocked: true, reason: "Plan A" },
+  });
+  expect(first.status).toBe(201);
+
+  const second = await api("POST", "/astrologers/me/exceptions", {
+    token: astro.accessToken,
+    body: { date: "2026-12-26", isBlocked: false, startTime: "10:00", endTime: "14:00", reason: "Plan B" },
+  });
+  expect(second.status).toBe(201);
+
+  const list = await api("GET", "/astrologers/me/exceptions", {
+    token: astro.accessToken,
+  });
+  const body = await json<ExceptionsBody>(list);
+  const matching = body.exceptions.filter((e) => e.date.slice(0, 10) === "2026-12-26");
+  expect(matching).toHaveLength(1);
+  expect(matching[0]?.reason).toBe("Plan B");
+});
+
+test("adjusted exception without times is rejected", async () => {
+  const res = await api("POST", "/astrologers/me/exceptions", {
+    token: astro.accessToken,
+    body: { date: "2026-12-27", isBlocked: false },
+  });
+  expect(res.status).toBe(400);
+});
+
+test("overlapping availability rules for the same day are rejected", async () => {
+  const res = await api("POST", "/astrologers/me/availability-rules", {
+    token: astro.accessToken,
+    body: { dayOfWeek: 1, startTime: "12:00", endTime: "14:00" },
+  });
+  expect(res.status).toBe(400);
+});
+
+test("bulk availability template applies windows to selected days and leaves others alone", async () => {
+  const res = await api("POST", "/astrologers/me/availability-rules/bulk", {
+    token: astro.accessToken,
+    body: {
+      daysOfWeek: [0, 4],
+      windows: [
+        { startTime: "09:00", endTime: "13:00" },
+        { startTime: "14:00", endTime: "19:00" },
+      ],
+    },
+  });
+  expect(res.status).toBe(200);
+  const body = await json<RulesBody>(res);
+
+  const fri = body.rules.filter((r) => r.dayOfWeek === 4);
+  expect(fri).toHaveLength(2);
+  const sunday = body.rules.filter((r) => r.dayOfWeek === 0);
+  expect(sunday).toHaveLength(2);
+  // Existing Monday rule is untouched.
+  const monday = body.rules.filter((r) => r.dayOfWeek === 1);
+  expect(monday.length).toBeGreaterThanOrEqual(1);
+});
+
+test("bulk availability template with empty windows clears the selected days", async () => {
+  const res = await api("POST", "/astrologers/me/availability-rules/bulk", {
+    token: astro.accessToken,
+    body: { daysOfWeek: [0], windows: [] },
+  });
+  expect(res.status).toBe(200);
+  const body = await json<RulesBody>(res);
+  expect(body.rules.filter((r) => r.dayOfWeek === 0)).toHaveLength(0);
+});
+
+test("bulk availability template rejects overlapping windows", async () => {
+  const res = await api("POST", "/astrologers/me/availability-rules/bulk", {
+    token: astro.accessToken,
+    body: {
+      daysOfWeek: [5],
+      windows: [
+        { startTime: "09:00", endTime: "15:00" },
+        { startTime: "14:00", endTime: "19:00" },
+      ],
+    },
+  });
+  expect(res.status).toBe(400);
 });

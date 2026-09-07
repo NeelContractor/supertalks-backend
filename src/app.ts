@@ -5,8 +5,10 @@ import cors from "cors";
 import authRoutes from "./routes/auth";
 import astrologerRoutes from "./routes/astrologers";
 import bookingRoutes from "./routes/bookings";
+import paymentRoutes from "./routes/payments";
 import questionRoutes from "./routes/questions";
 import templateRoutes from "./routes/templates";
+import userRoutes from "./routes/users";
 
 export const app = express();
 
@@ -17,6 +19,7 @@ app.use(
       "http://localhost:3001",
       "http://localhost:3002",
       "http://localhost:5173",
+      "http://localhost:8081",
     ],
     credentials: true,
   })
@@ -28,7 +31,9 @@ app.use("/auth", authRoutes);
 app.use("/astrologers", astrologerRoutes);
 app.use("/bookings", bookingRoutes);
 app.use("/questions", questionRoutes);
+app.use("/payments", paymentRoutes);
 app.use("/templates", templateRoutes);
+app.use("/", userRoutes);
 
 app.get("/api/hello", (req, res) => {
   res.json({

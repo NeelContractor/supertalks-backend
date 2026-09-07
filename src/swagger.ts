@@ -31,6 +31,21 @@ const swaggerDefinition = {
           role: { type: "string", enum: ["Client", "Astrologer", "Admin"] },
         },
       },
+      UserExtended: {
+        type: "object",
+        properties: {
+          id: { type: "string", format: "uuid" },
+          name: { type: "string" },
+          email: { type: "string", format: "email" },
+          emailVerified: { type: "boolean" },
+          mobile: { type: "string", nullable: true },
+          mobileVerified: { type: "boolean" },
+          username: { type: "string" },
+          profileImageUrl: { type: "string", nullable: true },
+          role: { type: "string", enum: ["Client", "Astrologer", "Admin"] },
+          createdAt: { type: "string", format: "date-time" },
+        },
+      },
     },
   },
 };

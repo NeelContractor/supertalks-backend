@@ -1,20 +1,29 @@
 import { Router } from "express";
-import { requireAuth } from "../lib/middleware";
+import { requireAuth, requireClient } from "../lib/middleware";
 import { db } from "../../prisma/db";
 import { sendValidationError, paramString } from "../lib/http";
-import { QuestionStatus, UserRole } from "@prisma/client";
+import { PaymentFor, PaymentStatus, QuestionStatus, UserRole } from "@prisma/client";
 import {
   createQuestionSchema,
   answerQuestionSchema,
   rejectQuestionSchema,
+  sendQuestionMessageSchema,
 } from "../types/questions";
 
 const router = Router();
 
-const ANSWERABLE: QuestionStatus[] = [
+/** Statuses in which the assigned astrologer may answer, reject, or message. Paid questions only. */
+const ANSWERABLE: QuestionStatus[] = [QuestionStatus.Queued];
+
+/** Statuses in which a client may send messages (each creates a payment intent). */
+const CLIENT_CHATTABLE: QuestionStatus[] = [
   QuestionStatus.PendingPayment,
   QuestionStatus.Queued,
+  QuestionStatus.Answered,
 ];
+
+/** Statuses in which the astrologer may send messages (client must have paid at least once). */
+const ASTROLOGER_CHATTABLE: QuestionStatus[] = [QuestionStatus.Queued, QuestionStatus.Answered];
 
 function inStatus(status: QuestionStatus, list: QuestionStatus[]): boolean {
   return list.includes(status);
@@ -32,6 +41,36 @@ async function getAstrologerProfileId(userId: string) {
     select: { id: true },
   });
   return profile?.id ?? null;
+}
+
+/** Is the given user a participant in this question (client or assigned astrologer)? */
+async function isQuestionOwner(
+  question: { clientId: string; astrologerId: string },
+  userId: string,
+): Promise<boolean> {
+  if (question.clientId === userId) return true;
+  const profileId = await getAstrologerProfileId(userId);
+  return profileId !== null && question.astrologerId === profileId;
+}
+
+async function listMessages(questionId: string) {
+  return db.questionMessage.findMany({
+    where: { questionId },
+    orderBy: { createdAt: "asc" },
+    include: { sender: { select: { id: true, name: true } } },
+  });
+}
+
+async function createMessage(
+  questionId: string,
+  senderId: string,
+  senderRole: UserRole,
+  body: string,
+  paymentId?: string,
+) {
+  return db.questionMessage.create({
+    data: { questionId, senderId, senderRole, body, paymentId },
+  });
 }
 
 /**
@@ -79,6 +118,8 @@ router.get("/", requireAuth, async (req, res) => {
         return res.status(403).json({ error: "User is not an astrologer" });
       }
       where.astrologerId = profileId;
+      // Unpaid questions (no paid message yet) are not visible to astrologers.
+      where.status = { not: QuestionStatus.PendingPayment };
     } else {
       where.clientId = userId;
     }
@@ -105,6 +146,17 @@ router.get("/", requireAuth, async (req, res) => {
               user: { select: { name: true } },
             },
           },
+          messages: {
+            orderBy: { createdAt: "desc" },
+            take: 1,
+            select: {
+              id: true,
+              senderId: true,
+              senderRole: true,
+              body: true,
+              createdAt: true,
+            },
+          },
         },
       }),
       db.question.count({ where }),
@@ -116,7 +168,10 @@ router.get("/", requireAuth, async (req, res) => {
     ]);
 
     return res.json({
-      questions,
+      questions: questions.map(({ messages, ...question }) => ({
+        ...question,
+        lastMessage: messages[0] ?? null,
+      })),
       total,
       counts: {
         all: allTotal,
@@ -155,10 +210,11 @@ router.get("/", requireAuth, async (req, res) => {
  *       201: { description: Question created }
  *       400: { description: Validation error }
  *       401: { description: Unauthorized }
+ *       403: { description: Client access required or astrologer not accepting questions }
  *       404: { description: Astrologer not found }
  *       500: { description: Internal server error }
  */
-router.post("/", requireAuth, async (req, res) => {
+router.post("/", requireClient, async (req, res) => {
   try {
     const parsed = createQuestionSchema.safeParse(req.body);
     if (!parsed.success) return sendValidationError(res, parsed.error);
@@ -170,6 +226,10 @@ router.post("/", requireAuth, async (req, res) => {
       where: { id: astrologerId },
     });
     if (!astrologer) return res.status(404).json({ error: "Astrologer not found" });
+
+    if (!astrologer.isAcceptingQuestions) {
+      return res.status(403).json({ error: "Astrologer is not accepting questions" });
+    }
 
     const question = await db.question.create({
       data: {
@@ -287,6 +347,8 @@ router.patch("/:id/answer", requireAuth, async (req, res) => {
       },
     });
 
+    await createMessage(question.id, userId, UserRole.Astrologer, parsed.data.answerText);
+
     return res.json({ question: updated });
   } catch (err) {
     console.error("Answer question error:", err);
@@ -352,6 +414,196 @@ router.patch("/:id/reject", requireAuth, async (req, res) => {
     return res.json({ question: updated });
   } catch (err) {
     console.error("Reject question error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/**
+ * @openapi
+ * /questions/{id}/unreject:
+ *   patch:
+ *     tags: [Questions]
+ *     summary: Return a rejected question to the queued (answerable) state (astrologer only)
+ *     description: Lets an astrologer change their mind after rejecting. The client gets a chance to be answered again.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     responses:
+ *       200: { description: Question returned to queue }
+ *       401: { description: Unauthorized }
+ *       403: { description: Not the assigned astrologer or invalid state }
+ *       404: { description: Question not found }
+ *       500: { description: Internal server error }
+ */
+router.patch("/:id/unreject", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user!.id;
+    const question = await getQuestion(req.params.id);
+    if (!question) return res.status(404).json({ error: "Question not found" });
+
+    const profileId = await getAstrologerProfileId(userId);
+    if (!profileId || question.astrologerId !== profileId) {
+      return res.status(403).json({ error: "Only the assigned astrologer can unreject" });
+    }
+
+    if (question.status !== QuestionStatus.Rejected) {
+      return res.status(403).json({ error: "Only rejected questions can be unrejected" });
+    }
+
+    const updated = await db.question.update({
+      where: { id: question.id },
+      data: {
+        status: QuestionStatus.Queued,
+        rejectionReason: null,
+      },
+    });
+
+    return res.json({ question: updated });
+  } catch (err) {
+    console.error("Unreject question error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/**
+ * @openapi
+ * /questions/{id}/messages:
+ *   get:
+ *     tags: [Questions]
+ *     summary: Get the chat thread for a question (participants only)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     responses:
+ *       200: { description: Question and message thread }
+ *       401: { description: Unauthorized }
+ *       403: { description: Not a participant }
+ *       404: { description: Question not found }
+ *       500: { description: Internal server error }
+ */
+router.get("/:id/messages", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user!.id;
+    const question = await getQuestion(req.params.id);
+    if (!question) return res.status(404).json({ error: "Question not found" });
+
+    if (!(await isQuestionOwner(question, userId))) {
+      return res.status(403).json({ error: "Not allowed to view this question" });
+    }
+
+    const messages = await listMessages(question.id);
+    return res.json({ question, messages });
+  } catch (err) {
+    console.error("List question messages error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/**
+ * @openapi
+ * /questions/{id}/messages:
+ *   post:
+ *     tags: [Questions]
+ *     summary: Send a message in the question chat (participants only)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [body]
+ *             properties:
+ *               body: { type: string, minLength: 1, maxLength: 2000 }
+ *     responses:
+ *       201: { description: Message sent }
+ *       400: { description: Validation error }
+ *       401: { description: Unauthorized }
+ *       403: { description: Not a participant or thread closed }
+ *       404: { description: Question not found }
+ *       500: { description: Internal server error }
+ */
+router.post("/:id/messages", requireAuth, async (req, res) => {
+  try {
+    const parsed = sendQuestionMessageSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return sendValidationError(res, parsed.error);
+
+    const userId = req.user!.id;
+    const question = await getQuestion(req.params.id);
+    if (!question) return res.status(404).json({ error: "Question not found" });
+
+    if (!(await isQuestionOwner(question, userId))) {
+      return res.status(403).json({ error: "Not allowed to message this question" });
+    }
+
+    const user = await db.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    if (!user) return res.status(401).json({ error: "User not found" });
+
+    const chattable =
+      user.role === UserRole.Astrologer
+        ? ASTROLOGER_CHATTABLE
+        : CLIENT_CHATTABLE;
+    if (!inStatus(question.status, chattable)) {
+      return res.status(403).json({ error: "This question thread is closed" });
+    }
+
+    // Client messages are paid: creating a message creates a payment intent
+    // that the client then settles via POST /payments/:paymentId/complete.
+    if (user.role !== UserRole.Astrologer) {
+      const payment = await db.payment.create({
+        data: {
+          payerId: userId,
+          payeeAstrologerId: question.astrologerId,
+          amountPaise: question.pricePaise,
+          currency: "INR",
+          provider: "mock",
+          purpose: PaymentFor.Question,
+          status: PaymentStatus.Created,
+          questionId: question.id,
+          messageBody: parsed.data.body,
+        },
+      });
+      return res.status(201).json({
+        requiresPayment: true,
+        payment: {
+          id: payment.id,
+          amountPaise: payment.amountPaise,
+          currency: payment.currency,
+        },
+        question,
+      });
+    }
+
+    const message = await createMessage(question.id, userId, user.role, parsed.data.body);
+
+    let updated: typeof question = question;
+    if (inStatus(question.status, ANSWERABLE)) {
+      updated = await db.question.update({
+        where: { id: question.id },
+        data: { status: QuestionStatus.Answered, answeredAt: new Date() },
+      });
+    }
+
+    return res.status(201).json({ message, question: updated });
+  } catch (err) {
+    console.error("Send question message error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });

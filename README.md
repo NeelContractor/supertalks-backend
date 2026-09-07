@@ -55,9 +55,32 @@ bun run dev:testing  # starts on http://localhost:3100
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/auth/register` | Register (validated by `@supertalks/contracts`) |
+| `POST` | `/auth/register` | Register (validated by `@supertalks/contracts`); creates a `Client` by default |
 | `POST` | `/auth/signin` | Login via email **or** username |
 | `POST` | `/auth/signout` | Revoke a refresh token (auth required) |
+
+### Current user (auth required, any role)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/me` | Own profile |
+| `PATCH` | `/me` | name, mobile, profileImageUrl |
+
+### Client side (Client role only)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/bookings` | Book a slot (requires `Idempotency-Key` header; validated against open slots) |
+| `GET` | `/bookings` | Own bookings (role-aware list + counts) |
+| `GET` | `/bookings/:id` | Own booking detail |
+| `PATCH` | `/bookings/:id/reschedule` | Reschedule own booking |
+| `PATCH` | `/bookings/:id/cancel` | Cancel own booking |
+| `POST` | `/questions` | Ask an astrologer a question |
+| `GET` | `/questions` | Own questions (role-aware list + counts) |
+| `GET` | `/questions/:id` | Own question detail |
+
+Clients first fetch open slots at `GET /astrologers/:slug/slots?date=YYYY-MM-DD`, then create a booking
+with the exact `startAt` value returned.
 
 ### Astrologer own profile (auth required)
 

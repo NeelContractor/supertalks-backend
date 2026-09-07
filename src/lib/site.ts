@@ -90,6 +90,22 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Structural equality for arbitrary JSON-like values (Postgres jsonb reorders keys). */
+export function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (isPlainObject(a) && isPlainObject(b)) {
+    const aKeys = Object.keys(a);
+    const bKeys = Object.keys(b);
+    if (aKeys.length !== bKeys.length) return false;
+    return aKeys.every((key) => deepEqual(a[key], b[key]));
+  }
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) return false;
+    return a.every((value, i) => deepEqual(value, b[i]));
+  }
+  return false;
+}
+
 function coerceScalar(field: TemplateField, value: unknown): string | number {
   if (field.type === "number") {
     if (typeof value === "number" && Number.isFinite(value)) {
@@ -123,10 +139,21 @@ function coerceArray(field: TemplateField, value: unknown): Record<string, unkno
       ? field.default.filter(isPlainObject)
       : [];
 
-  return source.map((item) => {
+  return source.map((item, itemIndex) => {
     const out: Record<string, unknown> = {};
     for (const [key, itemField] of Object.entries(itemProps)) {
-      out[key] = coerceFieldValue(itemField, item[key]);
+      let value = item[key];
+      // Backfill per-item selects added after a site was saved (e.g. the
+      // approach icons) so existing sections still get varied defaults.
+      if (
+        value === undefined &&
+        itemField.type === "select" &&
+        itemField.options != null &&
+        itemField.options.length > 0
+      ) {
+        value = itemField.options[itemIndex % itemField.options.length];
+      }
+      out[key] = coerceFieldValue(itemField, value);
     }
     return out;
   });
@@ -215,6 +242,8 @@ export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
       default: true,
       props: {
         siteName: { type: "text", default: "Lee Mor" },
+        logo: { type: "image", default: "" },
+        logoAlt: { type: "text", default: "Lee Mor" },
         heading: { type: "text", default: "Discover\nInner Peace" },
         subtitle: { type: "text", default: "Embrace Healing Today" },
         ctaLabel: { type: "text", default: "Get Started" },
@@ -312,6 +341,11 @@ export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
           type: "array",
           itemName: "Value",
           itemProps: {
+            icon: {
+              type: "select",
+              options: ["leaf", "bloom", "teardrop"],
+              default: "leaf",
+            },
             title: { type: "text", default: "Value" },
             body: {
               type: "textarea",
@@ -320,19 +354,50 @@ export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
           },
           default: [
             {
+              icon: "leaf",
               title: "Confidentiality",
               body: "Confidentiality is at the core of our therapy practice. We prioritize privacy and trust, ensuring that your personal information and sessions remain completely confidential.",
             },
             {
+              icon: "bloom",
               title: "Empathy",
               body: "Empathy is the foundation of our therapeutic approach. We provide a compassionate and understanding environment where you can feel heard, validated, and supported throughout your healing journey.",
             },
             {
+              icon: "teardrop",
               title: "Personalized Care",
               body: "We believe in offering personalized care to every client. Our tailored therapy sessions focus on your unique needs and goals, allowing for a customized therapeutic experience.",
             },
           ],
         },
+      },
+    },
+    {
+      id: "book",
+      type: "BookingSection",
+      name: "Book a Session",
+      default: true,
+      props: {
+        heading: { type: "text", default: "Book a Session" },
+        subtitle: {
+          type: "text",
+          default: "Pick a day and time that works for you for a private call.",
+        },
+      },
+    },
+    {
+      id: "question",
+      type: "QuestionSection",
+      name: "Ask a Question",
+      default: true,
+      props: {
+        heading: { type: "text", default: "Ask a Question" },
+        subtitle: {
+          type: "textarea",
+          default:
+            "Prefer a written answer? Send your question across and get a personal response.",
+        },
+        buttonLabel: { type: "text", default: "Ask Question" },
       },
     },
     {
@@ -416,6 +481,8 @@ export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
       default: true,
       props: {
         siteName: { type: "text", default: "Lee Mor" },
+        logo: { type: "image", default: "" },
+        logoAlt: { type: "text", default: "Lee Mor" },
         phone: { type: "text", default: "123-456-7890" },
         email: { type: "text", default: "info@mysite.com" },
         address: {
@@ -441,10 +508,26 @@ const DEFAULT_TEMPLATE = {
 /** Idempotently ensure at least one base template exists (seeded on boot). */
 export async function ensureDefaultTemplates() {
   const count = await db.websiteTemplate.count();
-  if (count > 0) return;
-  await db.websiteTemplate.create({
-    data: DEFAULT_TEMPLATE as unknown as Prisma.WebsiteTemplateCreateInput,
+  if (count === 0) {
+    await db.websiteTemplate.create({
+      data: DEFAULT_TEMPLATE as unknown as Prisma.WebsiteTemplateCreateInput,
+    });
+    return;
+  }
+
+  // Keep the seeded default template's schema in sync with this file so
+  // schema changes (new sections, new props, updated defaults) reach
+  // existing astrologers' sites and the editor. Only the seeded default is
+  // touched (identified by its seed values), never a customised template.
+  const seed = await db.websiteTemplate.findFirst({
+    where: { name: DEFAULT_TEMPLATE.name, isActive: true, previewImageUrl: null },
   });
+  if (seed && !deepEqual(seed.schema, DEFAULT_TEMPLATE_SCHEMA)) {
+    await db.websiteTemplate.update({
+      where: { id: seed.id },
+      data: { schema: DEFAULT_TEMPLATE_SCHEMA as unknown as Prisma.InputJsonValue },
+    });
+  }
 }
 
 /** The template a profile should use when none is chosen yet. */

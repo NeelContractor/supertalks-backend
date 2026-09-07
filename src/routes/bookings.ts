@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import { requireAuth } from "../lib/middleware";
+import { requireAuth, requireClient } from "../lib/middleware";
 import { db } from "../../prisma/db";
 import { sendValidationError, paramString } from "../lib/http";
 import {
@@ -12,6 +12,7 @@ import {
   rescheduleBookingSchema,
   cancelBookingSchema,
 } from "../types/scheduling";
+import { openSlotsForRules } from "../lib/scheduling";
 
 const router = Router();
 
@@ -119,15 +120,16 @@ router.get("/", requireAuth, async (req, res) => {
         orderBy: { startAt: "desc" },
         take: limit,
         skip: offset,
-        include: {
-          client: { select: { id: true, name: true, email: true } },
-          astrologer: {
-            select: {
-              id: true,
-              user: { select: { name: true } },
+include: {
+            client: { select: { id: true, name: true, email: true } },
+            astrologer: {
+              select: {
+                id: true,
+                slug: true,
+                user: { select: { name: true } },
+              },
             },
           },
-        },
       }),
       db.booking.count({ where }),
       db.booking.count({ where: countWhere }),
@@ -193,16 +195,17 @@ router.get("/", requireAuth, async (req, res) => {
  *             required: [astrologerId, startAt]
  *             properties:
  *               astrologerId: { type: string, format: uuid }
- *               startAt: { type: string, format: date-time, description: ISO 8601 UTC }
+ *               startAt: { type: string, format: date-time, description: ISO 8601 UTC, pick from GET /astrologers/:slug/slots }
  *     responses:
  *       201: { description: Booking created }
  *       400: { description: Validation error }
  *       401: { description: Unauthorized }
+ *       403: { description: Client access required or astrologer not accepting bookings }
  *       404: { description: Astrologer not found }
  *       409: { description: Slot unavailable }
  *       500: { description: Internal server error }
  */
-router.post("/", requireAuth, async (req, res) => {
+router.post("/", requireClient, async (req, res) => {
   try {
     const parsed = createBookingSchema.safeParse(req.body);
     if (!parsed.success) return sendValidationError(res, parsed.error);
@@ -215,14 +218,36 @@ router.post("/", requireAuth, async (req, res) => {
     const clientId = req.user!.id;
     const { astrologerId, startAt } = parsed.data;
 
+    const start = new Date(startAt);
+    const dateKey = start.toISOString().slice(0, 10);
+
     const astrologer = await db.astrologerProfile.findUnique({
       where: { id: astrologerId },
+      include: {
+        availabilityRules: { where: { isActive: true } },
+        availabilityExceptions: {
+          where: { date: new Date(`${dateKey}T00:00:00`) },
+        },
+      },
     });
     if (!astrologer) return res.status(404).json({ error: "Astrologer not found" });
 
+    if (!astrologer.isAcceptingBookings) {
+      return res.status(403).json({ error: "Astrologer is not accepting bookings" });
+    }
+
     const slotDuration = astrologer.slotDurationMinutes;
-    const start = new Date(startAt);
     const end = new Date(start.getTime() + slotDuration * 60000);
+
+    const openSlots = openSlotsForRules(
+      astrologer,
+      astrologer.availabilityRules,
+      astrologer.availabilityExceptions,
+      dateKey
+    );
+    if (!openSlots.some((s) => s.startAt === start.toISOString())) {
+      return res.status(409).json({ error: "Slot is not available for booking" });
+    }
 
     const overlapping = await db.booking.findFirst({
       where: {

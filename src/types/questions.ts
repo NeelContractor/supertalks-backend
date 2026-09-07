@@ -14,3 +14,7 @@ export const answerQuestionSchema = z.object({
 export const rejectQuestionSchema = z.object({
   reason: z.string().max(300),
 });
+
+export const sendQuestionMessageSchema = z.object({
+  body: z.string().trim().min(1).max(2000),
+});

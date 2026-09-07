@@ -76,7 +76,7 @@ model User {
   emailVerified   Boolean  @default(false) @map("email_verified")
   mobile          String?
   mobileVerified  Boolean  @default(false) @map("mobile_verified")
-  username        String   @unique
+  username        String?  @unique
   passwordHash    String?  @map("password_hash")
   profileImageUrl String?  @map("profile_image_url")
   role            UserRole @default(Client)
@@ -89,6 +89,7 @@ model User {
   refreshTokens     RefreshToken[]
   bookingsAsClient  Booking[]           @relation("ClientBookings")
   questionsAsClient Question[]          @relation("ClientQuestions")
+  questionMessages  QuestionMessage[]
   payments          Payment[]
 
   @@map("users")
@@ -195,6 +196,7 @@ model AvailabilityException {
 
   astrologer AstrologerProfile @relation(fields: [astrologerId], references: [id])
 
+  @@unique([astrologerId, date])
   @@map("availability_exceptions")
 }
 
@@ -239,8 +241,26 @@ model Question {
   client     User              @relation("ClientQuestions", fields: [clientId], references: [id])
   astrologer AstrologerProfile @relation("AstrologerQuestions", fields: [astrologerId], references: [id])
   payment    Payment?          @relation(fields: [paymentId], references: [id])
+  messages   QuestionMessage[]
 
   @@map("questions")
+}
+
+model QuestionMessage {
+  id         String   @id @default(uuid()) @db.Uuid
+  questionId String   @map("question_id") @db.Uuid
+  senderId   String   @map("sender_id") @db.Uuid
+  senderRole UserRole @map("sender_role")
+  body       String
+  paymentId  String?  @unique @map("payment_id") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  question Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  sender   User     @relation(fields: [senderId], references: [id])
+  payment  Payment? @relation(fields: [paymentId], references: [id])
+
+  @@index([questionId, createdAt])
+  @@map("question_messages")
 }
 
 model Payment {
@@ -254,13 +274,17 @@ model Payment {
   providerOrderId   String?       @map("provider_order_id")
   status            PaymentStatus @default(Created)
   purpose           PaymentFor
+  questionId        String?       @map("question_id") @db.Uuid
+  messageBody       String?       @map("message_body")
   rawWebhookPayload Json?         @map("raw_webhook_payload")
   createdAt         DateTime      @default(now()) @map("created_at")
   updatedAt         DateTime      @updatedAt @map("updated_at")
 
-  payer     User       @relation(fields: [payerId], references: [id])
-  bookings  Booking[]
-  questions Question[]
+  payer           User              @relation(fields: [payerId], references: [id])
+  bookings        Booking[]
+  questions       Question[]
+  paidMessages    QuestionMessage[]
 
+  @@index([questionId])
   @@map("payments")
 }
