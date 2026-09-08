@@ -32,7 +32,18 @@ function inStatus(status: QuestionStatus, list: QuestionStatus[]): boolean {
 async function getQuestion(id: string | string[] | undefined) {
   const parsed = paramString(id);
   if (!parsed) return null;
-  return db.question.findUnique({ where: { id: parsed } });
+  return db.question.findUnique({
+    where: { id: parsed },
+    include: {
+      client: { select: { id: true, name: true } },
+      astrologer: {
+        select: {
+          id: true,
+          user: { select: { name: true } },
+        },
+      },
+    },
+  });
 }
 
 async function getAstrologerProfileId(userId: string) {
@@ -595,10 +606,11 @@ router.post("/:id/messages", requireAuth, async (req, res) => {
 
     let updated: typeof question = question;
     if (inStatus(question.status, ANSWERABLE)) {
-      updated = await db.question.update({
+      await db.question.update({
         where: { id: question.id },
         data: { status: QuestionStatus.Answered, answeredAt: new Date() },
       });
+      updated = (await getQuestion(question.id))!;
     }
 
     return res.status(201).json({ message, question: updated });
