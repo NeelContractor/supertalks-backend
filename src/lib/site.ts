@@ -56,8 +56,38 @@ export interface TemplateSchema {
   sections: TemplateSection[];
 }
 
+export interface FieldStyle {
+  fontSize?: string;
+  color?: string;
+  fontFamily?: string;
+  fontWeight?: string;
+  fontStyle?: string;
+  textTransform?: string;
+}
+
+const FIELD_STYLE_KEYS = new Set([
+  "fontSize",
+  "color",
+  "fontFamily",
+  "fontWeight",
+  "fontStyle",
+  "textTransform",
+]);
+
+/** Keep only known string style keys so stored JSON stays predictable. */
+export function sanitizeFieldStyle(value: unknown): FieldStyle | undefined {
+  if (!isPlainObject(value)) return undefined;
+  const out: FieldStyle = {};
+  for (const key of FIELD_STYLE_KEYS) {
+    const v = value[key];
+    if (typeof v === "string" && v !== "") out[key as keyof FieldStyle] = v;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 export interface StoredSection {
   props: Record<string, unknown>;
+  fieldStyles?: Record<string, FieldStyle>;
 }
 
 export interface StoredTemplateData {
@@ -71,6 +101,7 @@ export interface SiteSectionDoc {
   name: string;
   default: boolean;
   props: Record<string, unknown>;
+  fieldStyles?: Record<string, FieldStyle>;
 }
 
 export interface SiteDocument {
@@ -176,13 +207,21 @@ function resolveProps(
 }
 
 /** Sanitise incoming templateData into the stored shape, dropping anything the schema does not know about. */
+// Sections that may never be removed from a live site. The stored data only
+// tracks the sections an astrologer has, so dropping the key for a section
+// removes it from their site.
+export const ESSENTIAL_SECTION_IDS: ReadonlySet<string> = new Set(["book", "question"]);
+
 export function sanitizeTemplateData(
   schema: TemplateSchema,
   input: unknown,
 ): StoredTemplateData {
   const raw = (isPlainObject(input) ? input : {}) as {
     design?: Record<string, unknown>;
-    sections?: Record<string, { props?: Record<string, unknown> }>;
+    sections?: Record<
+      string,
+      { props?: Record<string, unknown>; fieldStyles?: Record<string, unknown> }
+    >;
   };
 
   const design: Record<string, string | number> = {};
@@ -192,11 +231,32 @@ export function sanitizeTemplateData(
       typeof value === "string" || typeof value === "number" ? value : String(value ?? "");
   }
 
+  const rawSections = isPlainObject(raw.sections) ? raw.sections : null;
+  const presentIds = rawSections ? new Set(Object.keys(rawSections)) : null;
+
   const sections: Record<string, StoredSection> = {};
   for (const section of schema.sections) {
-    sections[section.id] = {
-      props: resolveProps(section.props, raw.sections?.[section.id]?.props),
-    };
+    // No stored sections at all (new/legacy data) -> keep every schema section
+    // with defaults. Otherwise keep submitted sections plus the essential ones,
+    // so removing any other section actually persists.
+    if (
+      presentIds === null ||
+      presentIds.has(section.id) ||
+      ESSENTIAL_SECTION_IDS.has(section.id)
+    ) {
+      const stored = rawSections?.[section.id];
+      const fieldStyles: Record<string, FieldStyle> = {};
+      if (isPlainObject(stored?.fieldStyles)) {
+        for (const [key, style] of Object.entries(stored.fieldStyles)) {
+          const clean = sanitizeFieldStyle(style);
+          if (clean) fieldStyles[key] = clean;
+        }
+      }
+      sections[section.id] = {
+        props: resolveProps(section.props, stored?.props),
+        ...(Object.keys(fieldStyles).length > 0 ? { fieldStyles } : {}),
+      };
+    }
   }
 
   return { design, sections };
@@ -207,13 +267,20 @@ export function mergeTemplate(schema: TemplateSchema, templateData: unknown): Si
   const stored = sanitizeTemplateData(schema, templateData ?? {});
   return {
     design: stored.design,
-    sections: schema.sections.map((section) => ({
-      id: section.id,
-      type: section.type,
-      name: section.name,
-      default: section.default,
-      props: stored.sections[section.id]?.props ?? {},
-    })),
+    sections: schema.sections.flatMap((section) => {
+      const storedSec = stored.sections[section.id];
+      if (!storedSec) return [];
+      return [
+        {
+          id: section.id,
+          type: section.type,
+          name: section.name,
+          default: section.default,
+          props: storedSec.props ?? {},
+          ...(storedSec.fieldStyles ? { fieldStyles: storedSec.fieldStyles } : {}),
+        },
+      ];
+    }),
   };
 }
 
@@ -231,8 +298,8 @@ export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
     panelColor: { type: "color", default: "#fff4f3" },
     backgroundColor: { type: "color", default: "#fffcfc" },
     darkColor: { type: "color", default: "#253039" },
-    displayFont: { type: "select", options: ["serif", "sans"], default: "serif" },
-    bodyFont: { type: "select", options: ["sans", "serif"], default: "sans" },
+    displayFont: { type: "text", default: "serif" },
+    bodyFont: { type: "text", default: "sans" },
   },
   sections: [
     {
@@ -241,17 +308,17 @@ export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
       name: "Hero",
       default: true,
       props: {
-        siteName: { type: "text", default: "Lee Mor" },
+        siteName: { type: "text", default: "Astro Guide" },
         logo: { type: "image", default: "" },
-        logoAlt: { type: "text", default: "Lee Mor" },
-        heading: { type: "text", default: "Discover\nInner Peace" },
-        subtitle: { type: "text", default: "Embrace Healing Today" },
-        ctaLabel: { type: "text", default: "Get Started" },
-        ctaLink: { type: "text", default: "#words" },
+        logoAlt: { type: "text", default: "Astro Guide" },
+        heading: { type: "text", default: "Discover\nYour Path" },
+        subtitle: { type: "text", default: "Guidance Through the Stars" },
+        ctaLabel: { type: "text", default: "Book a Consultation" },
+        ctaLink: { type: "text", default: "#book" },
         image: { type: "image", default: "/site-assets/portrait.jpg" },
         imageAlt: {
           type: "text",
-          default: "Lee Mor seated in a warm, plant-filled room",
+          default: "Astrologer seated in a warm, plant-filled room",
         },
       },
     },
@@ -265,7 +332,7 @@ export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
         quote: {
           type: "textarea",
           default:
-            "As a therapist, I believe in the power of healing through understanding and self-discovery. My goal is to support you on your journey towards mental well-being and inner peace.",
+            "The stars offer guidance, but your choices shape your journey. Through Vedic astrology, I help you understand the planetary influences in your life and find greater clarity, confidence, and direction.",
         },
       },
     },
@@ -275,11 +342,11 @@ export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
       name: "About",
       default: true,
       props: {
-        heading: { type: "text", default: "About Lee Mor" },
+        heading: { type: "text", default: "About Your Astrologer" },
         body: {
           type: "textarea",
           default:
-            "Lee Mor is a dedicated therapist offering compassionate and personalized therapy services. With a focus on empathy and confidentiality, we provide a safe space for you to explore your feelings and work towards positive change. Our therapy sessions are tailored to your individual needs, promoting growth and self-awareness.",
+            "With a deep understanding of Vedic astrology, I offer personalized consultations to help you gain clarity about the important areas of your life. From career and relationships to marriage, finances, and personal growth, each reading is based on your unique birth chart. My approach combines traditional astrological wisdom with practical guidance, creating a thoughtful and meaningful experience for every consultation.",
         },
         buttonLabel: { type: "text", default: "Learn More" },
         buttonLink: { type: "text", default: "#about" },
@@ -301,30 +368,30 @@ export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
       name: "Services",
       default: true,
       props: {
-        heading: { type: "text", default: "Services" },
+        heading: { type: "text", default: "Astrology Services" },
         items: {
           type: "array",
           itemName: "Service",
           itemProps: {
-            title: { type: "text", default: "Individual" },
+            title: { type: "text", default: "Birth Chart Reading" },
             body: {
               type: "textarea",
               default:
-                "Our individual therapy sessions are designed to address your specific concerns and help you navigate life's challenges. Through a collaborative and supportive approach, we aim to empower you to overcome obstacles and live a fulfilling life.",
+                "Understand your unique birth chart, planetary influences, strengths, challenges, and important life patterns through a personalized Vedic astrology reading.",
             },
           },
           default: [
             {
-              title: "Individual",
-              body: "Our individual therapy sessions are designed to address your specific concerns and help you navigate life's challenges. Through a collaborative and supportive approach, we aim to empower you to overcome obstacles and live a fulfilling life.",
+              title: "Birth Chart Reading",
+              body: "Understand your unique birth chart, planetary influences, strengths, challenges, and important life patterns through a personalized Vedic astrology reading.",
             },
             {
-              title: "Couples",
-              body: "Our couples therapy focuses on enhancing communication, building trust, and strengthening relationships. We provide a neutral and supportive environment for couples to address conflicts, improve intimacy, and foster a deeper connection.",
+              title: "Career & Finance",
+              body: "Gain insights into your career path, professional opportunities, financial patterns, and favorable periods for making important decisions.",
             },
             {
-              title: "Family",
-              body: "Family therapy sessions aim to improve family dynamics, resolve conflicts, and strengthen bonds. By promoting understanding and effective communication, we help families navigate challenges together and create harmonious relationships.",
+              title: "Marriage & Relationships",
+              body: "Explore relationship compatibility, marriage prospects, partnership patterns, and planetary influences affecting your personal relationships.",
             },
           ],
         },
@@ -355,18 +422,18 @@ export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
           default: [
             {
               icon: "leaf",
-              title: "Confidentiality",
-              body: "Confidentiality is at the core of our therapy practice. We prioritize privacy and trust, ensuring that your personal information and sessions remain completely confidential.",
+              title: "Traditional Wisdom",
+              body: "I draw upon traditional Vedic astrology principles to interpret planetary positions, dashas, nakshatras, and transits within your birth chart.",
             },
             {
               icon: "bloom",
-              title: "Empathy",
-              body: "Empathy is the foundation of our therapeutic approach. We provide a compassionate and understanding environment where you can feel heard, validated, and supported throughout your healing journey.",
+              title: "Personalized Guidance",
+              body: "Every birth chart is unique. Each consultation is tailored to your individual circumstances, questions, goals, and planetary influences.",
             },
             {
               icon: "teardrop",
-              title: "Personalized Care",
-              body: "We believe in offering personalized care to every client. Our tailored therapy sessions focus on your unique needs and goals, allowing for a customized therapeutic experience.",
+              title: "Clarity & Awareness",
+              body: "Astrology is a tool for awareness and guidance. My goal is to help you understand your possibilities and approach life's important decisions with greater clarity.",
             },
           ],
         },
@@ -378,10 +445,10 @@ export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
       name: "Book a Session",
       default: true,
       props: {
-        heading: { type: "text", default: "Book a Session" },
+        heading: { type: "text", default: "Book a Consultation" },
         subtitle: {
           type: "text",
-          default: "Pick a day and time that works for you for a private call.",
+          default: "Choose a convenient day and time for your personalized astrology consultation.",
         },
       },
     },
@@ -391,13 +458,13 @@ export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
       name: "Ask a Question",
       default: true,
       props: {
-        heading: { type: "text", default: "Ask a Question" },
+        heading: { type: "text", default: "Ask an Astrologer" },
         subtitle: {
           type: "textarea",
           default:
-            "Prefer a written answer? Send your question across and get a personal response.",
+            "Have a question about your birth chart, career, relationships, or life's next chapter? Send your question and receive personalized guidance.",
         },
-        buttonLabel: { type: "text", default: "Ask Question" },
+        buttonLabel: { type: "text", default: "Ask a Question" },
       },
     },
     {
@@ -420,17 +487,17 @@ export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
           default: [
             {
               quote:
-                "Lee Mor has been a guiding light in my journey towards self-discovery and healing. Their compassionate approach and expertise have truly",
+                "The consultation gave me a completely new perspective on my career and the decisions I was facing. The reading was detailed, thoughtful, and easy to understand.",
               author: "Sara H.",
             },
             {
               quote:
-                "I am grateful for Lee Mor's support and guidance during a challenging time in my life. Their professionalism and care have been invaluable.",
+                "I was amazed by how clearly my birth chart reflected different phases of my life. The guidance helped me approach an important decision with much more confidence.",
               author: "James T.",
             },
             {
               quote:
-                "Lee Mor's therapy sessions have provided me with a safe space to explore my thoughts and emotions. I highly recommend their services",
+                "A wonderful and insightful experience. Everything was explained patiently and in a practical way. I would definitely recommend a consultation.",
               author: "Emily L.",
             },
           ],
@@ -456,19 +523,19 @@ export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
           },
           default: [
             {
-              question: "What services do you offer?",
+              question: "What information do I need for a consultation?",
               answer:
-                "Lee Mor provides a range of therapy services tailored to individual needs, including cognitive behavioral therapy, mindfulness techniques, and stress management. Each session is personalized to address specific concerns and promote overall well-being.",
+                "Your date of birth, exact time of birth, and place of birth are generally required to prepare and interpret your birth chart accurately.",
             },
             {
-              question: "How do I schedule an appointment?",
+              question: "What astrology services do you offer?",
               answer:
-                "Scheduling an appointment with Lee Mor is easy. Simply contact our office via phone or email to book a convenient time for your initial consultation. We strive to accommodate your schedule and provide prompt assistance.",
+                "Consultations can cover birth chart readings, career and finance, marriage and relationships, compatibility, planetary periods, transits, and other areas of personal guidance.",
             },
             {
-              question: "What can I expect during a therapy session?",
+              question: "What can I expect during an astrology consultation?",
               answer:
-                "During a therapy session with Lee Mor, you can expect a safe and confidential environment where you can openly discuss your thoughts and feelings. Our therapist will listen attentively, offer guidance, and work collaboratively with you to explore solutions and promote personal growth.",
+                "During your consultation, we will explore your birth chart and discuss the areas of life that are most important to you. Planetary influences, significant periods, and relevant insights will be explained in a clear and practical way.",
             },
           ],
         },
@@ -480,18 +547,18 @@ export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
       name: "Footer",
       default: true,
       props: {
-        siteName: { type: "text", default: "Lee Mor" },
+        siteName: { type: "text", default: "Astro Guide" },
         logo: { type: "image", default: "" },
-        logoAlt: { type: "text", default: "Lee Mor" },
+        logoAlt: { type: "text", default: "Astro Guide" },
         phone: { type: "text", default: "123-456-7890" },
-        email: { type: "text", default: "info@mysite.com" },
+        email: { type: "text", default: "info@astrology.com" },
         address: {
           type: "text",
           default: "500 Terry Francine St. San Francisco, CA 94158",
         },
         copyright: {
           type: "text",
-          default: "© 2035 by Lee Mor. Powered and secured by SuperTalks",
+          default: "© 2026 by Astro Guide. All rights reserved.",
         },
       },
     },
@@ -499,7 +566,7 @@ export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
 };
 
 const DEFAULT_TEMPLATE = {
-  name: "Lee Mor – Therapist",
+  name: "Supertalks",
   previewImageUrl: null,
   schema: DEFAULT_TEMPLATE_SCHEMA,
   isActive: true,

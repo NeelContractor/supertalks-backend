@@ -2,6 +2,7 @@ import { Router } from "express";
 import { requireAuth, requireClient } from "../lib/middleware";
 import { db } from "../../prisma/db";
 import { sendValidationError, paramString } from "../lib/http";
+import { broadcastMessage, broadcastQuestionUpdate } from "../lib/realtime";
 import { PaymentFor, PaymentStatus, QuestionStatus, UserRole } from "@prisma/client";
 import {
   createQuestionSchema,
@@ -358,7 +359,9 @@ router.patch("/:id/answer", requireAuth, async (req, res) => {
       },
     });
 
-    await createMessage(question.id, userId, UserRole.Astrologer, parsed.data.answerText);
+    const message = await createMessage(question.id, userId, UserRole.Astrologer, parsed.data.answerText);
+
+    await Promise.all([broadcastMessage(question.id, message.id), broadcastQuestionUpdate(question.id)]);
 
     return res.json({ question: updated });
   } catch (err) {
@@ -422,6 +425,8 @@ router.patch("/:id/reject", requireAuth, async (req, res) => {
       },
     });
 
+    await broadcastQuestionUpdate(question.id);
+
     return res.json({ question: updated });
   } catch (err) {
     console.error("Reject question error:", err);
@@ -472,6 +477,8 @@ router.patch("/:id/unreject", requireAuth, async (req, res) => {
         rejectionReason: null,
       },
     });
+
+    await broadcastQuestionUpdate(question.id);
 
     return res.json({ question: updated });
   } catch (err) {
@@ -612,6 +619,9 @@ router.post("/:id/messages", requireAuth, async (req, res) => {
       });
       updated = (await getQuestion(question.id))!;
     }
+
+    await broadcastMessage(question.id, message.id);
+    await broadcastQuestionUpdate(question.id);
 
     return res.status(201).json({ message, question: updated });
   } catch (err) {

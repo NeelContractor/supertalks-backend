@@ -2,6 +2,7 @@ import { Router } from "express";
 import { requireAuth } from "../lib/middleware";
 import { db } from "../../prisma/db";
 import { paramString } from "../lib/http";
+import { broadcastMessage, broadcastQuestionUpdate } from "../lib/realtime";
 import { PaymentFor, PaymentStatus, QuestionStatus, UserRole } from "@prisma/client";
 
 const router = Router();
@@ -107,6 +108,12 @@ router.post("/:paymentId/complete", requireAuth, async (req, res) => {
     });
 
     const message = await withSender(settled.message);
+    if (settled.message?.questionId) {
+      await Promise.all([
+        broadcastMessage(settled.message.questionId, settled.message.id),
+        broadcastQuestionUpdate(settled.message.questionId),
+      ]);
+    }
     return res.json({
       payment: serializePayment(settled.updatedPayment),
       message,

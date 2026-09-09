@@ -8,7 +8,7 @@ const ACCESS_SECRET = new TextEncoder().encode(
 );
 const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || "dev-refresh-secret-change-me";
 
-const ACCESS_TOKEN_EXPIRY = "15m";
+const ACCESS_TOKEN_EXPIRY = "1h";
 const REFRESH_TOKEN_DAYS = 7;
 
 export async function hashPassword(password: string): Promise<string> {
