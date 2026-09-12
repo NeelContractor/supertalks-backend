@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction } from "express";
-import { verifyAccessToken } from "./auth";
+import { verifyAccessToken, isSessionActive } from "./auth";
 import { UserRole } from "@prisma/client";
 
 export interface AuthUser {
@@ -31,6 +31,14 @@ export async function requireAuth(
     const payload = await verifyAccessToken(token);
     if (!payload.sub) {
       return res.status(401).json({ error: "Invalid token" });
+    }
+
+    // If the token carries a session id, make sure that session wasn't revoked
+    // by a newer login on another device. Tokens without `sid` (issued before
+    // this policy existed, or by internal flows) are accepted as-is.
+    const sid = payload.sid as string | undefined;
+    if (sid && !(await isSessionActive(sid))) {
+      return res.status(401).json({ error: "Session expired" });
     }
 
     req.user = { id: payload.sub as string, role: (payload.role as string) || "" };

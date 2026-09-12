@@ -1,20 +1,21 @@
+import { createServer } from "node:http";
 import { app } from "./app";
 import { ensureDefaultTemplates } from "./lib/site";
-import { startRealtimeServer } from "./lib/realtime";
+import { attachRealtime } from "./lib/realtime";
 
 const PORT = Number(process.env.PORT || 3000);
-const WS_PORT = Number(process.env.WS_PORT || 3003);
 
 async function start() {
   await ensureDefaultTemplates();
 
-  app.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
+  // Single HTTP server serves both the REST API and the realtime channel.
+  const server = createServer(app);
+  attachRealtime(server);
 
-  // Bun-native WebSocket server for real-time chat push.
-  startRealtimeServer(WS_PORT);
-  console.log(`Realtime server running on ws://localhost:${WS_PORT}`);
+  server.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Realtime server running on ws://localhost:${PORT}/ws`);
+  });
 }
 
 start()
