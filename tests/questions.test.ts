@@ -372,6 +372,129 @@ describe("payment gating", () => {
   });
 });
 
+describe("batch question order", () => {
+  let buyerToken = "";
+  let buyerEmail = "";
+  let paymentId = "";
+  let batchQuestionIds: string[] = [];
+
+  beforeAll(async () => {
+    buyerEmail = testEmail("batch");
+    const res = await registerUser({
+      name: "Batch Buyer",
+      email: buyerEmail,
+      username: uniqueUsername(),
+      password: "ClientPass1",
+    });
+    buyerToken = (await json<{ accessToken: string }>(res)).accessToken;
+  });
+
+  afterAll(async () => {
+    const { db } = await import("../prisma/db");
+    if (paymentId) await db.payment.deleteMany({ where: { id: paymentId } });
+    await cleanupUsers(buyerEmail);
+  });
+
+  test("creates multiple questions with one covering payment", async () => {
+    const res = await api("POST", "/questions/batch", {
+      token: buyerToken,
+      body: {
+        astrologerId: astrologer.profile.id,
+        clientDetails: {
+          clientName: "Asha Sharma",
+          birthDate: "1990-05-14",
+          birthTime: "06:30",
+          birthPlace: "Mumbai, India",
+        },
+        items: [
+          { questionText: "When will I get married?", category: "Love & Marriage" },
+          { questionText: "Should I change my career path?", category: "Career & Business" },
+        ],
+      },
+    });
+    expect(res.status).toBe(201);
+    const body = await json<{
+      payment: {
+        id: string;
+        amountPaise: number;
+        clientDetails?: {
+          clientName: string;
+          birthDate?: string;
+          birthTime?: string;
+          birthPlace?: string;
+        } | null;
+      };
+      questions: { id: string; status: string; pricePaise: number }[];
+      count: number;
+    }>(res);
+    paymentId = body.payment.id;
+    expect(body.payment.amountPaise).toBe(9800);
+    expect(body.payment.clientDetails).toEqual({
+      clientName: "Asha Sharma",
+      birthDate: "1990-05-14",
+      birthTime: "06:30",
+      birthPlace: "Mumbai, India",
+    });
+    expect(body.count).toBe(2);
+    expect(body.questions).toHaveLength(2);
+    expect(body.questions.every((q) => q.status === "PendingPayment")).toBe(true);
+    expect(body.questions.every((q) => q.pricePaise === 4900)).toBe(true);
+    batchQuestionIds = body.questions.map((q) => q.id);
+  });
+
+  test("unsettled batch questions are not visible to the astrologer", async () => {
+    const list = await api("GET", "/questions", { token: astrologer.accessToken });
+    const body = await json<{ questions: { id: string }[] }>(list);
+    for (const id of batchQuestionIds) {
+      expect(body.questions.find((q) => q.id === id)).toBeUndefined();
+    }
+  });
+
+  test("settling the covering payment queues every question", async () => {
+    const complete = await api("POST", `/payments/${paymentId}/complete`, {
+      token: buyerToken,
+    });
+    expect(complete.status).toBe(200);
+    const body = await json<{ questions: { id: string; status: string }[] | null }>(complete);
+    expect(body.questions).toHaveLength(2);
+    expect(body.questions!.every((q) => q.status === "Queued")).toBe(true);
+
+    const list = await api("GET", "/questions", { token: astrologer.accessToken });
+    const listed = await json<{ questions: { id: string; status: string; clientDetails?: { clientName: string } | null }[] }>(list);
+    for (const id of batchQuestionIds) {
+      const q = listed.questions.find((q) => q.id === id);
+      expect(q?.status).toBe("Queued");
+      expect(q?.clientDetails?.clientName).toBe("Asha Sharma");
+    }
+  });
+
+  test("settling again is idempotent", async () => {
+    const again = await api("POST", `/payments/${paymentId}/complete`, { token: buyerToken });
+    expect(again.status).toBe(200);
+    const body = await json<{ questions: { id: string }[] | null }>(again);
+    expect(body.questions).toHaveLength(2);
+  });
+
+  test("batch order validates items and requires auth", async () => {
+    const empty = await api("POST", "/questions/batch", {
+      token: buyerToken,
+      body: { astrologerId: astrologer.profile.id, items: [] },
+    });
+    expect(empty.status).toBe(400);
+
+    const missing = await api("POST", "/questions/batch", {
+      token: buyerToken,
+      body: { astrologerId: astrologer.profile.id },
+    });
+    expect(missing.status).toBe(400);
+
+    const noAuth = await api("POST", "/questions/batch", {
+      body: { astrologerId: astrologer.profile.id, items: [{ questionText: "Will I be lucky anyway?" }] },
+    });
+    expect(noAuth.status).toBe(401);
+  });
+});
+
 async function createDirect(astrologerId: string, token = clientToken): Promise<{ id: string }> {
   const res = await api("POST", "/questions", {
     token,

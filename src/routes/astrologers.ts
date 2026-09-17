@@ -4,7 +4,7 @@ import { randomBytes } from "crypto";
 import { requireAuth } from "../lib/middleware";
 import { signAccessToken } from "../lib/auth";
 import { db } from "../../prisma/db";
-import { UserRole } from "@prisma/client";
+import { UserRole, BookingStatus } from "@prisma/client";
 import { sendValidationError, paramString } from "../lib/http";
 import {
   updateAstrologerProfileSchema,
@@ -22,12 +22,80 @@ import {
   getTemplateSchema,
   sanitizeTemplateData,
 } from "../lib/site";
-import { openSlotsForRules, timeToMinutes, windowsOverlap } from "../lib/scheduling";
+import {
+  openSlotsForRules,
+  timeToMinutes,
+  windowsOverlap,
+  hhmmToMinutes,
+  minutesToHhmm,
+  exceptionWindowMinutes,
+  subtractWindow,
+} from "../lib/scheduling";
 
 const router = Router();
 
 const updateProfilePartial = updateAstrologerProfileSchema.partial();
 const updatePricingPartial = updatePricingSchema.partial();
+
+interface RuleConflict {
+  ruleId: string;
+  dayOfWeek: number;
+  startTime: string;
+  endTime: string;
+}
+
+interface ExceptionConflict {
+  exceptionId: string;
+  date: string;
+  isBlocked: boolean;
+  startTime: string | null;
+  endTime: string | null;
+  reason: string | null;
+}
+
+const BOOKING_BLOCKING_STATUSES = [BookingStatus.Confirmed, BookingStatus.Rescheduled];
+
+/**
+ * Exceptions that fall on `dayOfWeek` (today or later) whose window overlaps
+ * [startMin, endMin). Used to stop a weekly rule from being created on top of
+ * a date-specific exception.
+ */
+async function findExceptionClashes(
+  astrologerId: string,
+  dayOfWeek: number,
+  startMin: number,
+  endMin: number
+): Promise<ExceptionConflict[]> {
+  const todayStart = new Date();
+  todayStart.setUTCHours(0, 0, 0, 0);
+
+  const exceptions = await db.availabilityException.findMany({
+    where: { astrologerId, date: { gte: todayStart } },
+    select: {
+      id: true,
+      date: true,
+      isBlocked: true,
+      startTime: true,
+      endTime: true,
+      reason: true,
+    },
+  });
+
+  return exceptions
+    .filter((e) => {
+      if (e.date.getUTCDay() !== dayOfWeek) return false;
+      const { start, end } = exceptionWindowMinutes(e);
+      return windowsOverlap(start, end, startMin, endMin);
+    })
+    .map((e) => ({
+      exceptionId: e.id,
+      date: e.date.toISOString().slice(0, 10),
+      isBlocked: e.isBlocked,
+      startTime: e.startTime ? minutesToHhmm(timeToMinutes(e.startTime)) : null,
+      endTime: e.endTime ? minutesToHhmm(timeToMinutes(e.endTime)) : null,
+      reason: e.reason,
+    }));
+}
 
 async function getCurrentUser(userId: string) {
   const user = await db.user.findUnique({
@@ -440,6 +508,26 @@ router.post("/me/availability-rules", requireAuth, async (req, res) => {
         .json({ error: "Availability rule overlaps an existing rule for this day" });
     }
 
+    const resolve = (req.body as { resolve?: unknown })?.resolve;
+    const clashes = await findExceptionClashes(
+      profile.id,
+      dayOfWeek,
+      hhmmToMinutes(startTime),
+      hhmmToMinutes(endTime)
+    );
+    if (clashes.length > 0) {
+      if (resolve !== "remove-exceptions") {
+        return res.status(409).json({
+          error: "This availability clashes with an exception on that day",
+          code: "EXCEPTION_CONFLICT",
+          conflicts: clashes,
+        });
+      }
+      await db.availabilityException.deleteMany({
+        where: { id: { in: clashes.map((c) => c.exceptionId) } },
+      });
+    }
+
     const rule = await db.availabilityRule.create({
       data: {
         astrologerId: profile.id,
@@ -511,6 +599,34 @@ router.post("/me/availability-rules/bulk", requireAuth, async (req, res) => {
       startTime: new Date(`1970-01-01T${startTime}`),
       endTime: new Date(`1970-01-01T${endTime}`),
     });
+
+    const resolve = (req.body as { resolve?: unknown })?.resolve;
+    const clashes: ExceptionConflict[] = [];
+    for (const day of daysOfWeek) {
+      for (const w of windows) {
+        const found = await findExceptionClashes(
+          profile.id,
+          day,
+          hhmmToMinutes(w.startTime),
+          hhmmToMinutes(w.endTime)
+        );
+        for (const c of found) {
+          if (!clashes.some((x) => x.exceptionId === c.exceptionId)) clashes.push(c);
+        }
+      }
+    }
+    if (clashes.length > 0) {
+      if (resolve !== "remove-exceptions") {
+        return res.status(409).json({
+          error: "This availability clashes with an exception on that day",
+          code: "EXCEPTION_CONFLICT",
+          conflicts: clashes,
+        });
+      }
+      await db.availabilityException.deleteMany({
+        where: { id: { in: clashes.map((c) => c.exceptionId) } },
+      });
+    }
 
     for (const day of daysOfWeek) {
       const existing = await db.availabilityRule.findMany({
@@ -673,6 +789,26 @@ router.patch(
           .json({ error: "Availability rule overlaps an existing rule for this day" });
       }
 
+      const resolve = (req.body as { resolve?: unknown })?.resolve;
+      const clashes = await findExceptionClashes(
+        profile.id,
+        dayOfWeek,
+        timeToMinutes(newStart),
+        timeToMinutes(newEnd)
+      );
+      if (clashes.length > 0) {
+        if (resolve !== "remove-exceptions") {
+          return res.status(409).json({
+            error: "This availability clashes with an exception on that day",
+            code: "EXCEPTION_CONFLICT",
+            conflicts: clashes,
+          });
+        }
+        await db.availabilityException.deleteMany({
+          where: { id: { in: clashes.map((c) => c.exceptionId) } },
+        });
+      }
+
       const rule = await db.availabilityRule.update({
         where: { id: existing.id },
         data,
@@ -824,27 +960,124 @@ router.post("/me/exceptions", requireAuth, async (req, res) => {
     }
 
     const { date, isBlocked, startTime, endTime, reason } = parsed.data;
-    const exception = await db.availabilityException.upsert({
+    const resolve = (req.body as { resolve?: unknown })?.resolve;
+
+    const dayStart = new Date(`${date}T00:00:00Z`);
+    const dayOfWeek = dayStart.getUTCDay();
+    const excStartMin = startTime ? hhmmToMinutes(startTime) : 0;
+    const excEndMin = endTime ? hhmmToMinutes(endTime) : 24 * 60;
+    const excStartAt = new Date(dayStart.getTime() + excStartMin * 60000);
+    const excEndAt = new Date(dayStart.getTime() + excEndMin * 60000);
+
+    // A booked slot can never be blocked/adjusted away: the client already owns it.
+    const booked = await db.booking.findMany({
       where: {
-        astrologerId_date: {
+        astrologerId: profile.id,
+        status: { in: BOOKING_BLOCKING_STATUSES },
+        startAt: { lt: excEndAt },
+        endAt: { gt: excStartAt },
+      },
+      select: { id: true, startAt: true, endAt: true },
+    });
+    if (booked.length > 0) {
+      return res.status(409).json({
+        error:
+          "This exception overlaps a session already booked by a client. Reschedule or cancel that booking first.",
+        code: "BOOKING_CONFLICT",
+        bookings: booked.map((b) => ({
+          id: b.id,
+          startAt: b.startAt.toISOString(),
+          endAt: b.endAt.toISOString(),
+        })),
+      });
+    }
+
+    const rules = await db.availabilityRule.findMany({
+      where: { astrologerId: profile.id, dayOfWeek, isActive: true },
+      select: { id: true, dayOfWeek: true, startTime: true, endTime: true },
+    });
+    const clashes: RuleConflict[] = rules
+      .filter((r) =>
+        windowsOverlap(
+          excStartMin,
+          excEndMin,
+          timeToMinutes(r.startTime),
+          timeToMinutes(r.endTime)
+        )
+      )
+      .map((r) => ({
+        ruleId: r.id,
+        dayOfWeek: r.dayOfWeek,
+        startTime: minutesToHhmm(timeToMinutes(r.startTime)),
+        endTime: minutesToHhmm(timeToMinutes(r.endTime)),
+      }));
+
+    if (clashes.length > 0 && resolve !== "trim-rules") {
+      return res.status(409).json({
+        error: "This exception clashes with your availability",
+        code: "RULE_CONFLICT",
+        conflicts: clashes,
+      });
+    }
+
+    const exception = await db.$transaction(async (tx) => {
+      if (clashes.length > 0) {
+        for (const clash of clashes) {
+          const remaining = subtractWindow(
+            hhmmToMinutes(clash.startTime),
+            hhmmToMinutes(clash.endTime),
+            excStartMin,
+            excEndMin
+          );
+          if (remaining.length === 0) {
+            await tx.availabilityRule.delete({ where: { id: clash.ruleId } });
+            continue;
+          }
+          const first = remaining[0];
+          if (!first) continue;
+          const rest = remaining.slice(1);
+          await tx.availabilityRule.update({
+            where: { id: clash.ruleId },
+            data: {
+              startTime: new Date(`1970-01-01T${minutesToHhmm(first.start)}`),
+              endTime: new Date(`1970-01-01T${minutesToHhmm(first.end)}`),
+            },
+          });
+          for (const w of rest) {
+            await tx.availabilityRule.create({
+              data: {
+                astrologerId: profile.id,
+                dayOfWeek,
+                startTime: new Date(`1970-01-01T${minutesToHhmm(w.start)}`),
+                endTime: new Date(`1970-01-01T${minutesToHhmm(w.end)}`),
+              },
+            });
+          }
+        }
+      }
+
+      return tx.availabilityException.upsert({
+        where: {
+          astrologerId_date: {
+            astrologerId: profile.id,
+            date: new Date(`${date}T00:00:00`),
+          },
+        },
+        create: {
           astrologerId: profile.id,
           date: new Date(`${date}T00:00:00`),
+          isBlocked,
+          startTime: startTime ? new Date(`1970-01-01T${startTime}`) : null,
+          endTime: endTime ? new Date(`1970-01-01T${endTime}`) : null,
+          reason,
         },
-      },
-      create: {
-        astrologerId: profile.id,
-        date: new Date(`${date}T00:00:00`),
-        isBlocked,
-        startTime: startTime ? new Date(`1970-01-01T${startTime}`) : null,
-        endTime: endTime ? new Date(`1970-01-01T${endTime}`) : null,
-        reason,
-      },
-      update: {
-        isBlocked,
-        startTime: startTime ? new Date(`1970-01-01T${startTime}`) : null,
-        endTime: endTime ? new Date(`1970-01-01T${endTime}`) : null,
-        reason,
-      },
+        update: {
+          isBlocked,
+          startTime: startTime ? new Date(`1970-01-01T${startTime}`) : null,
+          endTime: endTime ? new Date(`1970-01-01T${endTime}`) : null,
+          reason,
+        },
+      });
     });
 
     return res.status(201).json({ exception });
@@ -1159,11 +1392,34 @@ router.get("/:slug/slots", async (req, res) => {
       return res.status(404).json({ error: "Astrologer not found" });
     }
 
-    const slots = openSlotsForRules(
+    const openSlots = openSlotsForRules(
       profile,
       profile.availabilityRules,
       profile.availabilityExceptions,
       date
+    );
+
+    // Hide slots that a settled booking already owns. PendingPayment holds are
+    // intentionally ignored so an abandoned checkout does not lock the slot.
+    const dayStart = new Date(`${date}T00:00:00.000Z`);
+    const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+    const booked = await db.booking.findMany({
+      where: {
+        astrologerId: profile.id,
+        status: { in: [BookingStatus.Confirmed, BookingStatus.Rescheduled] },
+        startAt: { lt: dayEnd },
+        endAt: { gt: dayStart },
+      },
+      select: { startAt: true, endAt: true },
+    });
+
+    const slots = openSlots.filter(
+      (slot) =>
+        !booked.some(
+          (b) =>
+            b.startAt.getTime() < new Date(slot.endAt).getTime() &&
+            b.endAt.getTime() > new Date(slot.startAt).getTime()
+        )
     );
 
     return res.json({ date, slots });

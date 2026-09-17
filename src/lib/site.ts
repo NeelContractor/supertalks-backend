@@ -465,6 +465,68 @@ export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
             "Have a question about your birth chart, career, relationships, or life's next chapter? Send your question and receive personalized guidance.",
         },
         buttonLabel: { type: "text", default: "Ask a Question" },
+        topics: {
+          type: "array",
+          itemName: "Topic",
+          itemProps: {
+            title: { type: "text", default: "My Career" },
+            description: { type: "textarea", default: "" },
+            questions: {
+              type: "array",
+              itemName: "Question",
+              itemProps: {
+                label: { type: "text", default: "Your question here" },
+              },
+            },
+          },
+          default: [
+            {
+              title: "My Career",
+              description: "Questions regarding my career, job, business and financial stability.",
+              questions: [
+                { label: "Which field will I be successful in?" },
+                { label: "When will I succeed in my career?" },
+                { label: "What is the scope of my career and when can I expect a good opportunity?" },
+                { label: "What is better for me: Government Job, Private Job or Business?" },
+                { label: "Which career field is good for me and which should I avoid?" },
+                { label: "How will my current job be and what is its future scope?" },
+                { label: "What will be the major turning point in my life?" },
+                { label: "Which single gemstone is suitable for my overall problems?" },
+                { label: "When will I get a job?" },
+                { label: "Which careers can bring financial stability for me?" },
+              ],
+            },
+            {
+              title: "About My Marriage",
+              description: "Questions regarding your future spouse and married life.",
+              questions: [
+                { label: "How will his/her nature be?" },
+                { label: "How will his/her looks be?" },
+                { label: "What will his/her profession be?" },
+                { label: "What type of marriage will I have: Love or Arranged?" },
+                { label: "Will it be inter-caste or same caste?" },
+                { label: "Will I marry a friend or an unknown person?" },
+                { label: "Which direction is favorable for my marriage?" },
+                { label: "When will I get married? Give the year and estimated months." },
+                { label: "Is Kumbh Vivah necessary for me or not?" },
+                { label: "Is there Manglik Dosha in my horoscope?" },
+                { label: "What is one gemstone, mantra or remedy for my overall problems?" },
+                { label: "How will my married life be?" },
+              ],
+            },
+            {
+              title: "My Health",
+              description: "Questions regarding health, wellness and self-care.",
+              questions: [
+                { label: "Which areas of my body need extra care?" },
+                { label: "Do I recover quickly from illness?" },
+                { label: "What kind of daily routine suits me best?" },
+                { label: "When should I focus more on self-care?" },
+                { label: "Is this a good time to start a healthy routine?" },
+              ],
+            },
+          ],
+        },
       },
     },
     {
@@ -586,9 +648,14 @@ export async function ensureDefaultTemplates() {
   // schema changes (new sections, new props, updated defaults) reach
   // existing astrologers' sites and the editor. Only the seeded default is
   // touched (identified by its seed values), never a customised template.
-  const seed = await db.websiteTemplate.findFirst({
-    where: { name: DEFAULT_TEMPLATE.name, isActive: true, previewImageUrl: null },
+  const candidates = await db.websiteTemplate.findMany({
+    where: { isActive: true, previewImageUrl: null },
   });
+  // Match the seeded default by the same name (case-insensitive so a casing
+  // drift like "SuperTalks" still syncs), not by a stored id which changes.
+  const seed = candidates.find(
+    (t) => t.name.toLowerCase() === DEFAULT_TEMPLATE.name.toLowerCase(),
+  );
   if (seed && !deepEqual(seed.schema, DEFAULT_TEMPLATE_SCHEMA)) {
     await db.websiteTemplate.update({
       where: { id: seed.id },

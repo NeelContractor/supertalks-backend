@@ -3,12 +3,13 @@ import { requireAuth, requireClient } from "../lib/middleware";
 import { db } from "../../prisma/db";
 import { sendValidationError, paramString } from "../lib/http";
 import { broadcastMessage, broadcastQuestionUpdate } from "../lib/realtime";
-import { PaymentFor, PaymentStatus, QuestionStatus, UserRole } from "@prisma/client";
+import { PaymentFor, PaymentStatus, Prisma, QuestionStatus, UserRole } from "@prisma/client";
 import {
   createQuestionSchema,
   answerQuestionSchema,
   rejectQuestionSchema,
   sendQuestionMessageSchema,
+  orderQuestionsSchema,
 } from "../types/questions";
 
 const router = Router();
@@ -158,6 +159,7 @@ router.get("/", requireAuth, async (req, res) => {
               user: { select: { name: true } },
             },
           },
+          payment: { select: { clientDetails: true } },
           messages: {
             orderBy: { createdAt: "desc" },
             take: 1,
@@ -180,9 +182,10 @@ router.get("/", requireAuth, async (req, res) => {
     ]);
 
     return res.json({
-      questions: questions.map(({ messages, ...question }) => ({
+      questions: questions.map(({ messages, payment, ...question }) => ({
         ...question,
         lastMessage: messages[0] ?? null,
+        clientDetails: payment?.clientDetails ?? null,
       })),
       total,
       counts: {
@@ -257,6 +260,138 @@ router.post("/", requireClient, async (req, res) => {
     return res.status(201).json({ question });
   } catch (err) {
     console.error("Create question error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/**
+ * @openapi
+ * /questions/batch:
+ *   post:
+ *     tags: [Questions]
+ *     summary: Order multiple questions at once (client selects preset questions and pays in one order)
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [astrologerId, items]
+ *             properties:
+ *               astrologerId: { type: string, format: uuid }
+ *               items:
+ *                 type: array
+ *                 minItems: 1
+ *                 maxItems: 20
+ *                 items:
+ *                   type: object
+ *                   required: [questionText]
+ *                   properties:
+ *                     questionText: { type: string, minLength: 3, maxLength: 1000 }
+ *                     category: { type: string, maxLength: 40 }
+ *     responses:
+ *       201:
+ *         description: Questions created with a single covering payment intent
+ *       400: { description: Validation error }
+ *       401: { description: Unauthorized }
+ *       403: { description: Client access required or astrologer not accepting questions }
+ *       404: { description: Astrologer not found }
+ *       500: { description: Internal server error }
+ */
+router.post("/batch", requireClient, async (req, res) => {
+  try {
+    const parsed = orderQuestionsSchema.safeParse(req.body);
+    if (!parsed.success) return sendValidationError(res, parsed.error);
+
+    const clientId = req.user!.id;
+    const { astrologerId, items, clientDetails } = parsed.data;
+
+    const astrologer = await db.astrologerProfile.findUnique({
+      where: { id: astrologerId },
+      select: { id: true, isAcceptingQuestions: true, questionPricePaise: true },
+    });
+    if (!astrologer) return res.status(404).json({ error: "Astrologer not found" });
+
+    if (!astrologer.isAcceptingQuestions) {
+      return res.status(403).json({ error: "Astrologer is not accepting questions" });
+    }
+
+    if (astrologer.questionPricePaise <= 0) {
+      return res.status(400).json({ error: "Astrologer has not set a question price" });
+    }
+
+    const totalPaise = astrologer.questionPricePaise * items.length;
+
+    const result = await db.$transaction(async (tx) => {
+      const questions = await Promise.all(
+        items.map((item) =>
+          tx.question.create({
+            data: {
+              clientId,
+              astrologerId,
+              questionText: item.questionText,
+              category: item.category ?? null,
+              pricePaise: astrologer.questionPricePaise,
+              status: QuestionStatus.PendingPayment,
+            },
+            select: {
+              id: true,
+              questionText: true,
+              category: true,
+              pricePaise: true,
+              status: true,
+              createdAt: true,
+            },
+          })
+        )
+      );
+
+      const payment = await tx.payment.create({
+        data: {
+          payerId: clientId,
+          payeeAstrologerId: astrologer.id,
+          amountPaise: totalPaise,
+          currency: "INR",
+          provider: "mock",
+          purpose: PaymentFor.Question,
+          status: PaymentStatus.Created,
+          clientDetails: clientDetails
+            ? (clientDetails as unknown as Prisma.InputJsonValue)
+            : Prisma.JsonNull,
+        },
+        select: {
+          id: true,
+          amountPaise: true,
+          currency: true,
+          status: true,
+          clientDetails: true,
+        },
+      });
+
+      // One covering payment for the whole order; each question points at it so
+      // settling the payment can activate every question at once.
+      await tx.question.updateMany({
+        where: { id: { in: questions.map((q) => q.id) } },
+        data: { paymentId: payment.id },
+      });
+
+      return { questions, payment };
+    });
+
+    return res.status(201).json({
+      payment: {
+        id: result.payment.id,
+        amountPaise: result.payment.amountPaise,
+        currency: result.payment.currency,
+        clientDetails: result.payment.clientDetails,
+      },
+      questions: result.questions,
+      count: result.questions.length,
+    });
+  } catch (err) {
+    console.error("Order questions error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });

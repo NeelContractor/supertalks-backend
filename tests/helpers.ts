@@ -121,6 +121,10 @@ export async function cleanupUsers(...emails: string[]) {
     }
     await db.booking.deleteMany({ where: { clientId: user.id } });
     await db.question.deleteMany({ where: { clientId: user.id } });
+    await db.payment.deleteMany({ where: { payerId: user.id } });
+    if (profile) {
+      await db.payment.deleteMany({ where: { payeeAstrologerId: profile.id } });
+    }
     await db.astrologerProfile.deleteMany({ where: { userId: user.id } });
     await db.refreshToken.deleteMany({ where: { userId: user.id } });
     await db.user.delete({ where: { id: user.id } });

@@ -6,6 +6,8 @@ import { sendValidationError, paramString } from "../lib/http";
 import {
   UserRole,
   BookingStatus,
+  PaymentFor,
+  PaymentStatus,
 } from "@prisma/client";
 import {
   createBookingSchema,
@@ -27,8 +29,10 @@ const CANCELLABLE: BookingStatus[] = [
   BookingStatus.Confirmed,
   BookingStatus.Rescheduled,
 ];
-const ACTIVE: BookingStatus[] = [
-  BookingStatus.PendingPayment,
+// A slot is only reserved by a settled booking. PendingPayment bookings are
+// soft holds: they let the same client resume an unfinished checkout without
+// permanently blocking the slot if they abandon it.
+const SLOT_BLOCKING: BookingStatus[] = [
   BookingStatus.Confirmed,
   BookingStatus.Rescheduled,
 ];
@@ -249,10 +253,32 @@ router.post("/", requireClient, async (req, res) => {
       return res.status(409).json({ error: "Slot is not available for booking" });
     }
 
+    // Resume an unfinished checkout for the same slot instead of stacking up
+    // duplicate pending bookings (and so the client can retry the payment).
+    const ownPending = await db.booking.findFirst({
+      where: {
+        astrologerId,
+        clientId,
+        status: BookingStatus.PendingPayment,
+        startAt: { lt: end },
+        endAt: { gt: start },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    if (ownPending) {
+      const payment = ownPending.paymentId
+        ? await db.payment.findUnique({
+            where: { id: ownPending.paymentId },
+            select: { id: true, amountPaise: true, currency: true, status: true },
+          })
+        : null;
+      return res.status(200).json({ booking: ownPending, payment });
+    }
+
     const overlapping = await db.booking.findFirst({
       where: {
         astrologerId,
-        status: { in: ACTIVE },
+        status: { in: SLOT_BLOCKING },
         startAt: { lt: end },
         endAt: { gt: start },
       },
@@ -261,18 +287,51 @@ router.post("/", requireClient, async (req, res) => {
       return res.status(409).json({ error: "Slot is no longer available" });
     }
 
-    const booking = await db.booking.create({
-      data: {
-        clientId,
-        astrologerId,
-        startAt: start,
-        endAt: end,
-        pricePaise: astrologer.callPricePerSlotPaise,
-        status: BookingStatus.PendingPayment,
-      },
+    const pricePaise = astrologer.callPricePerSlotPaise;
+    const needsPayment = pricePaise > 0;
+
+    const { booking, payment } = await db.$transaction(async (tx) => {
+      let paymentId: string | null = null;
+      let payment: {
+        id: string;
+        amountPaise: number;
+        currency: string;
+        status: PaymentStatus;
+      } | null = null;
+
+      if (needsPayment) {
+        // One payment intent per slot; settling it confirms the booking.
+        payment = await tx.payment.create({
+          data: {
+            payerId: clientId,
+            payeeAstrologerId: astrologerId,
+            amountPaise: pricePaise,
+            currency: "INR",
+            provider: "mock",
+            purpose: PaymentFor.Booking,
+            status: PaymentStatus.Created,
+          },
+          select: { id: true, amountPaise: true, currency: true, status: true },
+        });
+        paymentId = payment.id;
+      }
+
+      const booking = await tx.booking.create({
+        data: {
+          clientId,
+          astrologerId,
+          startAt: start,
+          endAt: end,
+          pricePaise,
+          paymentId,
+          status: needsPayment ? BookingStatus.PendingPayment : BookingStatus.Confirmed,
+        },
+      });
+
+      return { booking, payment };
     });
 
-    return res.status(201).json({ booking });
+    return res.status(201).json({ booking, payment });
   } catch (err) {
     console.error("Create booking error:", err);
     return res.status(500).json({ error: "Internal server error" });
@@ -385,7 +444,7 @@ router.patch("/:id/reschedule", requireAuth, async (req, res) => {
       where: {
         astrologerId: booking.astrologerId,
         id: { not: booking.id },
-        status: { in: ACTIVE },
+        status: { in: SLOT_BLOCKING },
         startAt: { lt: newEnd },
         endAt: { gt: newStart },
       },

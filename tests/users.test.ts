@@ -20,6 +20,9 @@ interface SlotsBody {
 interface BookingBody {
   booking: { id: string; clientId: string; status: string };
 }
+interface BookingPaymentBody extends BookingBody {
+  payment: { id: string; amountPaise: number } | null;
+}
 interface QuestionBody {
   question: { id: string; clientId: string; status: string };
 }
@@ -31,6 +34,9 @@ interface ListBody {
 let astro: Awaited<ReturnType<typeof createAstrologer>>;
 let monday: string;
 let client = { email: "", username: "", accessToken: "" as string };
+let bookingId = "";
+let bookingStartAt = "";
+let bookingPaymentId: string | null = null;
 const password = "ClientPass1";
 
 beforeAll(async () => {
@@ -111,9 +117,72 @@ test("client can book an open slot returned by /astrologers/:slug/slots", async 
     }),
   });
   expect(res.status).toBe(201);
-  const body = await json<BookingBody>(res);
+  const body = await json<BookingPaymentBody>(res);
   expect(body.booking.clientId).toBeDefined();
   expect(body.booking.status).toBe("PendingPayment");
+  expect(body.payment?.amountPaise).toBe(9900);
+  bookingId = body.booking.id;
+  bookingPaymentId = body.payment?.id ?? null;
+  bookingStartAt = firstSlot.startAt;
+});
+
+test("re-booking a slot with an unfinished payment resumes the same booking", async () => {
+  const res = await fetch(`${getBaseUrl()}/bookings`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": "test-booking-resume",
+      Authorization: `Bearer ${client.accessToken}`,
+    },
+    body: JSON.stringify({
+      astrologerId: astro.profile.id,
+      startAt: bookingStartAt,
+    }),
+  });
+  expect(res.status).toBe(200);
+  const body = await json<BookingPaymentBody>(res);
+  expect(body.booking.id).toBe(bookingId);
+  expect(body.payment?.id).toBe(bookingPaymentId ?? undefined);
+});
+
+test("abandoned pending payment does not hide the slot", async () => {
+  const slotsRes = await api("GET", `/astrologers/${astro.profile.slug}/slots?date=${monday}`);
+  const slotsBody = await json<SlotsBody>(slotsRes);
+  expect(slotsBody.slots.some((s) => s.startAt === bookingStartAt)).toBe(true);
+});
+
+test("settling a booking payment confirms the slot", async () => {
+  if (!bookingPaymentId) throw new Error("Expected a booking payment intent");
+  const res = await api("POST", `/payments/${bookingPaymentId}/complete`, {
+    token: client.accessToken,
+  });
+  expect(res.status).toBe(200);
+  const body = await json<{ bookings: { id: string; status: string }[] | null }>(res);
+  expect(body.bookings?.find((b) => b.id === bookingId)?.status).toBe("Confirmed");
+
+  const fetched = await api("GET", `/bookings/${bookingId}`, { token: client.accessToken });
+  const fetchedBody = await json<BookingBody>(fetched);
+  expect(fetchedBody.booking.status).toBe("Confirmed");
+});
+
+test("a confirmed slot is hidden and can no longer be booked", async () => {
+  const res = await fetch(`${getBaseUrl()}/bookings`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": "test-booking-conflict",
+      Authorization: `Bearer ${client.accessToken}`,
+    },
+    body: JSON.stringify({
+      astrologerId: astro.profile.id,
+      startAt: bookingStartAt,
+    }),
+  });
+  expect(res.status).toBe(409);
+
+  const slotsRes = await api("GET", `/astrologers/${astro.profile.slug}/slots?date=${monday}`);
+  const slotsBody = await json<SlotsBody>(slotsRes);
+  expect(slotsBody.slots.some((s) => s.startAt === bookingStartAt)).toBe(false);
 });
 
 test("client booking of an off-schedule time is rejected with 409", async () => {

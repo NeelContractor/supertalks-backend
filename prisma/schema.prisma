@@ -277,6 +277,7 @@ model Payment {
   questionId        String?       @map("question_id") @db.Uuid
   messageBody       String?       @map("message_body")
   rawWebhookPayload Json?         @map("raw_webhook_payload")
+  clientDetails    Json?          @map("client_details")
   createdAt         DateTime      @default(now()) @map("created_at")
   updatedAt         DateTime      @updatedAt @map("updated_at")
 
