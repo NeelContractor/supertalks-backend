@@ -313,7 +313,7 @@ export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
         logoAlt: { type: "text", default: "Astro Guide" },
         heading: { type: "text", default: "Discover\nYour Path" },
         subtitle: { type: "text", default: "Guidance Through the Stars" },
-        ctaLabel: { type: "text", default: "Book a Consultation" },
+        // ctaLabel: { type: "text", default: "Book a Consultation" },
         ctaLink: { type: "text", default: "#book" },
         image: { type: "image", default: "/site-assets/portrait.jpg" },
         imageAlt: {
@@ -408,50 +408,50 @@ export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
           type: "array",
           itemName: "Value",
           itemProps: {
-            icon: {
-              type: "select",
-              options: ["leaf", "bloom", "teardrop"],
-              default: "leaf",
-            },
+            // icon: {
+            //   type: "select",
+            //   options: ["leaf", "bloom", "teardrop"],
+            //   default: "leaf",
+            // },
             title: { type: "text", default: "Value" },
             body: {
               type: "textarea",
               default: "Describe this value in a sentence.",
             },
           },
-          default: [
-            {
-              icon: "leaf",
-              title: "Traditional Wisdom",
-              body: "I draw upon traditional Vedic astrology principles to interpret planetary positions, dashas, nakshatras, and transits within your birth chart.",
-            },
-            {
-              icon: "bloom",
-              title: "Personalized Guidance",
-              body: "Every birth chart is unique. Each consultation is tailored to your individual circumstances, questions, goals, and planetary influences.",
-            },
-            {
-              icon: "teardrop",
-              title: "Clarity & Awareness",
-              body: "Astrology is a tool for awareness and guidance. My goal is to help you understand your possibilities and approach life's important decisions with greater clarity.",
-            },
-          ],
+          // default: [
+          //   {
+          //     icon: "leaf",
+          //     title: "Traditional Wisdom",
+          //     body: "I draw upon traditional Vedic astrology principles to interpret planetary positions, dashas, nakshatras, and transits within your birth chart.",
+          //   },
+          //   {
+          //     icon: "bloom",
+          //     title: "Personalized Guidance",
+          //     body: "Every birth chart is unique. Each consultation is tailored to your individual circumstances, questions, goals, and planetary influences.",
+          //   },
+          //   {
+          //     icon: "teardrop",
+          //     title: "Clarity & Awareness",
+          //     body: "Astrology is a tool for awareness and guidance. My goal is to help you understand your possibilities and approach life's important decisions with greater clarity.",
+          //   },
+          // ],
         },
       },
     },
-    {
-      id: "book",
-      type: "BookingSection",
-      name: "Book a Session",
-      default: true,
-      props: {
-        heading: { type: "text", default: "Book a Consultation" },
-        subtitle: {
-          type: "text",
-          default: "Choose a convenient day and time for your personalized astrology consultation.",
-        },
-      },
-    },
+    // {
+    //   id: "book",
+    //   type: "BookingSection",
+    //   name: "Book a Session",
+    //   default: true,
+    //   props: {
+    //     heading: { type: "text", default: "Book a Consultation" },
+    //     subtitle: {
+    //       type: "text",
+    //       default: "Choose a convenient day and time for your personalized astrology consultation.",
+    //     },
+    //   },
+    // },
     {
       id: "question",
       type: "QuestionSection",
