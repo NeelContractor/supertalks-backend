@@ -44,8 +44,14 @@ console.log("Hello via Bun!");
 //
 // TODO — not yet implemented
 //   GET    /templates              (list available base templates for onboarding)
-//   POST   /payments/orders
-//   POST   /payments/webhook
+//
+// Payments (provider-aware; "mock" needs no gateway, "phonepe" uses the
+// PhonePe Payment Gateway Standard Checkout redirect flow)
+//   POST   /payments/:paymentId/initiate    (returns a gateway redirectUrl)
+//   GET    /payments/:paymentId             (poll the outcome after returning)
+//   POST   /payments/webhook                (PhonePe callback — signed)
+//   POST   /payments/phonepe/return         (PhonePe redirect target)
+//   POST   /payments/:paymentId/complete    (mock settlement only)
 
 // =============================================================
 // CLIENT-SIDE TESTING HELPERS (dev only)

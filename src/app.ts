@@ -9,6 +9,7 @@ import paymentRoutes from "./routes/payments";
 import questionRoutes from "./routes/questions";
 import templateRoutes from "./routes/templates";
 import userRoutes from "./routes/users";
+import cloudinaryRoutes from "./routes/cloudinary";
 
 export const app = express();
 
@@ -26,7 +27,13 @@ app.use(
     credentials: true,
   })
 );
-app.use(express.json());
+app.use(
+  express.json({
+    verify: (req, _res, buf) => {
+      (req as { rawBody?: Buffer }).rawBody = buf;
+    },
+  })
+);
 
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 app.use("/auth", authRoutes);
@@ -35,6 +42,7 @@ app.use("/bookings", bookingRoutes);
 app.use("/questions", questionRoutes);
 app.use("/payments", paymentRoutes);
 app.use("/templates", templateRoutes);
+app.use("/cloudinary", cloudinaryRoutes);
 app.use("/", userRoutes);
 
 app.get("/api/hello", (req, res) => {

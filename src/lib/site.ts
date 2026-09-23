@@ -313,7 +313,7 @@ export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
         logoAlt: { type: "text", default: "Astro Guide" },
         heading: { type: "text", default: "Discover\nYour Path" },
         subtitle: { type: "text", default: "Guidance Through the Stars" },
-        // ctaLabel: { type: "text", default: "Book a Consultation" },
+        ctaLabel: { type: "text", default: "Book a Consultation" },
         ctaLink: { type: "text", default: "#book" },
         image: { type: "image", default: "/site-assets/portrait.jpg" },
         imageAlt: {
@@ -439,19 +439,19 @@ export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
         },
       },
     },
-    // {
-    //   id: "book",
-    //   type: "BookingSection",
-    //   name: "Book a Session",
-    //   default: true,
-    //   props: {
-    //     heading: { type: "text", default: "Book a Consultation" },
-    //     subtitle: {
-    //       type: "text",
-    //       default: "Choose a convenient day and time for your personalized astrology consultation.",
-    //     },
-    //   },
-    // },
+    {
+      id: "book",
+      type: "BookingSection",
+      name: "Book a Session",
+      default: true,
+      props: {
+        heading: { type: "text", default: "Book a Consultation" },
+        subtitle: {
+          type: "text",
+          default: "Choose a convenient day and time for your personalized astrology consultation.",
+        },
+      },
+    },
     {
       id: "question",
       type: "QuestionSection",
