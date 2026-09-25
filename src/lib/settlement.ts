@@ -266,18 +266,36 @@ async function settleQuestion(
     throw new Error("Payment is missing question message data");
   }
 
-  const payer = await db.user.findUnique({
-    where: { id: payment.payerId },
-    select: { role: true },
-  });
+  // Resolve the payer's side by question ownership rather than by role, so an
+  // astrologer who also uses the product as a customer is recorded as the
+  // client on questions they asked. Matches the logic in POST /questions/:id/messages.
+  const [question, payerProfile] = await Promise.all([
+    db.question.findUnique({
+      where: { id: payment.questionId },
+      select: { id: true, clientId: true, astrologerId: true },
+    }),
+    db.astrologerProfile.findUnique({
+      where: { userId: payment.payerId },
+      select: { id: true },
+    }),
+  ]);
+  if (!question) throw new Error("Payment question not found");
+
+  const isClientSide = question.clientId === payment.payerId;
+  const isAstrologerSide =
+    payerProfile !== null && question.astrologerId === payerProfile.id;
+  const senderRole = isClientSide
+    ? UserRole.Client
+    : isAstrologerSide
+      ? UserRole.Astrologer
+      : UserRole.Client;
 
   const settled = await db.$transaction(async (tx) => {
     const message = await tx.questionMessage.create({
       data: {
         questionId: payment.questionId!,
         senderId: payment.payerId,
-        senderRole:
-          payer?.role === UserRole.Astrologer ? UserRole.Astrologer : UserRole.Client,
+        senderRole,
         body: payment.messageBody!,
         paymentId: payment.id,
       },

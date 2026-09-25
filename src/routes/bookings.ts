@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import { requireAuth, requireClient } from "../lib/middleware";
+import { requireAuth, requireCustomer } from "../lib/middleware";
 import { db } from "../../prisma/db";
 import { sendValidationError, paramString } from "../lib/http";
 import {
@@ -182,7 +182,7 @@ include: {
  * /bookings:
  *   post:
  *     tags: [Bookings]
- *     summary: Create a booking as a client (idempotency-keyed)
+ *     summary: Create a booking as a customer (any authenticated user, idempotency-keyed)
  *     security:
  *       - bearerAuth: []
  *     parameters:
@@ -204,12 +204,12 @@ include: {
  *       201: { description: Booking created }
  *       400: { description: Validation error }
  *       401: { description: Unauthorized }
- *       403: { description: Client access required or astrologer not accepting bookings }
+ *       403: { description: Customer access required or astrologer not accepting bookings }
  *       404: { description: Astrologer not found }
  *       409: { description: Slot unavailable }
  *       500: { description: Internal server error }
  */
-router.post("/", requireClient, async (req, res) => {
+router.post("/", requireCustomer, async (req, res) => {
   try {
     const parsed = createBookingSchema.safeParse(req.body);
     if (!parsed.success) return sendValidationError(res, parsed.error);

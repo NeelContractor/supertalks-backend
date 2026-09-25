@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { requireAuth, requireClient } from "../lib/middleware";
+import { requireAuth, requireCustomer } from "../lib/middleware";
 import { db } from "../../prisma/db";
 import { sendValidationError, paramString } from "../lib/http";
 import { broadcastMessage, broadcastQuestionUpdate } from "../lib/realtime";
@@ -101,6 +101,12 @@ async function createMessage(
  *         schema:
  *           type: string
  *           enum: [PendingPayment, Queued, Answered, Rejected, Refunded]
+ *       - in: query
+ *         name: role
+ *         required: false
+ *         schema:
+ *           type: string
+ *           enum: [client, astrologer]
  *     responses:
  *       200: { description: List of questions }
  *       400: { description: Invalid status filter }
@@ -109,7 +115,7 @@ async function createMessage(
  */
 router.get("/", requireAuth, async (req, res) => {
   try {
-    const { status } = req.query;
+    const { status, role } = req.query;
     const userId = req.user!.id;
 
     const statusFilter =
@@ -124,20 +130,32 @@ router.get("/", requireAuth, async (req, res) => {
     });
     if (!user) return res.status(401).json({ error: "User not found" });
 
+    // `role` lets a user (e.g. an astrologer who also uses the product as a
+    // customer) view questions from the other side. Defaults to their role.
+    const viewAs =
+      role === "astrologer"
+        ? UserRole.Astrologer
+        : role === "client"
+          ? UserRole.Client
+          : user.role;
+
     let where: Record<string, unknown> = {};
-    if (user.role === UserRole.Astrologer) {
+    if (viewAs === UserRole.Astrologer) {
       const profileId = await getAstrologerProfileId(userId);
       if (!profileId) {
         return res.status(403).json({ error: "User is not an astrologer" });
       }
       where.astrologerId = profileId;
-      // Unpaid questions (no paid message yet) are not visible to astrologers.
-      where.status = { not: QuestionStatus.PendingPayment };
+      if (statusFilter) {
+        where.status = statusFilter;
+      } else {
+        // Unpaid questions (no paid message yet) are not visible to astrologers.
+        where.status = { not: QuestionStatus.PendingPayment };
+      }
     } else {
       where.clientId = userId;
+      if (statusFilter) where.status = statusFilter;
     }
-
-    if (statusFilter) where.status = statusFilter;
 
     const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 10, 1), 100);
     const offset = Math.max(parseInt(req.query.offset as string) || 0, 0);
@@ -207,7 +225,7 @@ router.get("/", requireAuth, async (req, res) => {
  * /questions:
  *   post:
  *     tags: [Questions]
- *     summary: Ask a question as a client
+ *     summary: Ask a question as a customer (any authenticated user)
  *     security:
  *       - bearerAuth: []
  *     requestBody:
@@ -225,11 +243,11 @@ router.get("/", requireAuth, async (req, res) => {
  *       201: { description: Question created }
  *       400: { description: Validation error }
  *       401: { description: Unauthorized }
- *       403: { description: Client access required or astrologer not accepting questions }
+ *       403: { description: Customer access required or astrologer not accepting questions }
  *       404: { description: Astrologer not found }
  *       500: { description: Internal server error }
  */
-router.post("/", requireClient, async (req, res) => {
+router.post("/", requireCustomer, async (req, res) => {
   try {
     const parsed = createQuestionSchema.safeParse(req.body);
     if (!parsed.success) return sendValidationError(res, parsed.error);
@@ -296,11 +314,11 @@ router.post("/", requireClient, async (req, res) => {
  *         description: Questions created with a single covering payment intent
  *       400: { description: Validation error }
  *       401: { description: Unauthorized }
- *       403: { description: Client access required or astrologer not accepting questions }
+ *       403: { description: Customer access required or astrologer not accepting questions }
  *       404: { description: Astrologer not found }
  *       500: { description: Internal server error }
  */
-router.post("/batch", requireClient, async (req, res) => {
+router.post("/batch", requireCustomer, async (req, res) => {
   try {
     const parsed = orderQuestionsSchema.safeParse(req.body);
     if (!parsed.success) return sendValidationError(res, parsed.error);
@@ -709,8 +727,21 @@ router.post("/:id/messages", requireAuth, async (req, res) => {
     });
     if (!user) return res.status(401).json({ error: "User not found" });
 
+    // Resolve the sender's side by question ownership rather than by user.role,
+    // so someone who is both an astrologer and a customer is treated as the
+    // client on questions they asked (and pays) and as the astrologer on
+    // questions asked of them. The client side wins if both apply.
+    const profileId = await getAstrologerProfileId(userId);
+    const isAstrologerSide = profileId !== null && question.astrologerId === profileId;
+    const isClientSide = question.clientId === userId;
+    const senderRole = isClientSide
+      ? UserRole.Client
+      : isAstrologerSide
+        ? UserRole.Astrologer
+        : UserRole.Client;
+
     const chattable =
-      user.role === UserRole.Astrologer
+      senderRole === UserRole.Astrologer
         ? ASTROLOGER_CHATTABLE
         : CLIENT_CHATTABLE;
     if (!inStatus(question.status, chattable)) {
@@ -719,7 +750,7 @@ router.post("/:id/messages", requireAuth, async (req, res) => {
 
     // Client messages are paid: creating a message creates a payment intent
     // that the client then settles via POST /payments/:paymentId/complete.
-    if (user.role !== UserRole.Astrologer) {
+    if (senderRole !== UserRole.Astrologer) {
       const payment = await db.payment.create({
         data: {
           payerId: userId,
@@ -744,7 +775,7 @@ router.post("/:id/messages", requireAuth, async (req, res) => {
       });
     }
 
-    const message = await createMessage(question.id, userId, user.role, parsed.data.body);
+    const message = await createMessage(question.id, userId, senderRole, parsed.data.body);
 
     let updated: typeof question = question;
     if (inStatus(question.status, ANSWERABLE)) {

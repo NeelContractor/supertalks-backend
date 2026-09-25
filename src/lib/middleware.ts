@@ -48,14 +48,20 @@ export async function requireAuth(
   }
 }
 
-export async function requireClient(
+/**
+ * Allows any authenticated user to act as a customer (book a session with
+ * another astrologer or ask another astrologer a question). Astrologers may
+ * also be customers, so both roles are accepted. Admins are excluded.
+ */
+export async function requireCustomer(
   req: Request,
   res: Response,
   next: NextFunction
 ) {
   return requireAuth(req, res, () => {
-    if (!req.user || req.user.role !== UserRole.Client) {
-      return res.status(403).json({ error: "Client access required" });
+    const role = req.user?.role;
+    if (role !== UserRole.Client && role !== UserRole.Astrologer) {
+      return res.status(403).json({ error: "Customer access required" });
     }
     next();
   });
