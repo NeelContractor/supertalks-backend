@@ -23,6 +23,14 @@ enum AstrologerStatus {
   @@map("astrologer_status")
 }
 
+enum AstrologerApplicationStatus {
+  Submitted
+  Approved
+  Rejected
+
+  @@map("astrologer_application_status")
+}
+
 enum QuestionStatus {
   PendingPayment
   Queued
@@ -85,6 +93,7 @@ model User {
   updatedAt       DateTime @updatedAt @map("updated_at")
 
   astrologerProfile AstrologerProfile?
+  astrologerApplication AstrologerApplication?
   oauthAccounts     OauthAccount[]
   refreshTokens     RefreshToken[]
   bookingsAsClient  Booking[]           @relation("ClientBookings")
@@ -157,6 +166,9 @@ model AstrologerProfile {
   templateData            Json             @default("{}") @map("template_data")
   isAcceptingQuestions    Boolean          @default(true) @map("is_accepting_questions")
   isAcceptingBookings     Boolean          @default(true) @map("is_accepting_bookings")
+  /// When true, the public site shows a free-text box below the prefilled
+  /// questions so a client can submit a question of their own wording.
+  allowCustomQuestions    Boolean          @default(false) @map("allow_custom_questions")
   createdAt               DateTime         @default(now()) @map("created_at")
   updatedAt               DateTime         @updatedAt @map("updated_at")
 
@@ -168,6 +180,27 @@ model AstrologerProfile {
   questions               Question[]               @relation("AstrologerQuestions")
 
   @@map("astrologer_profiles")
+}
+
+/// What an astrologer submitted through the 7-step /register form. The form
+/// collects far more than the profile table models (services, bank, KYC), so
+/// the submission is kept verbatim as JSON for staff review while the fields
+/// that map onto AstrologerProfile are copied onto the profile itself.
+///
+/// NOTE: `payload` holds bank details, PAN/GSTIN and government ID numbers.
+/// It is only ever returned to the owning user, never listed for other users.
+model AstrologerApplication {
+  id          String                       @id @default(uuid()) @db.Uuid
+  userId      String                       @unique @map("user_id") @db.Uuid
+  status      AstrologerApplicationStatus  @default(Submitted)
+  payload     Json                         @default("{}")
+  submittedAt DateTime                     @default(now()) @map("submitted_at")
+  createdAt   DateTime                     @default(now()) @map("created_at")
+  updatedAt   DateTime                     @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("astrologer_applications")
 }
 
 model AvailabilityRule {

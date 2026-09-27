@@ -11,7 +11,12 @@ import {
 
 interface PublicProfileBody {
   user: { id: string; name: string };
-  profile: { slug: string; status: string };
+  profile: { slug: string; status: string; allowCustomQuestions?: boolean };
+}
+
+interface SiteBody {
+  allowCustomQuestions?: boolean;
+  questionPricePaise?: number;
 }
 
 interface MeBody {
@@ -24,6 +29,7 @@ interface ProfileBody {
     specializations?: string[];
     languages?: string[];
     timezone?: string;
+    allowCustomQuestions?: boolean;
     questionPricePaise?: number;
     callPricePerSlotPaise?: number;
     slotDurationMinutes?: number;
@@ -146,4 +152,59 @@ test("GET /astrologers/:slug returns 404 for unknown slug", async () => {
   const res = await api("GET", "/astrologers/does-not-exist");
   expect(res.status).toBe(404);
   expect((await json<{ error: string }>(res)).error).toBe("Astrologer not found");
+});
+
+test("custom questions are off until the astrologer opts in", async () => {
+  const res = await api("GET", `/astrologers/${astro.profile.slug}/site`);
+  expect(res.status).toBe(200);
+  expect((await json<SiteBody>(res)).allowCustomQuestions).toBe(false);
+});
+
+test("PATCH /astrologers/me toggles allowCustomQuestions", async () => {
+  const on = await api("PATCH", "/astrologers/me", {
+    token: astro.accessToken,
+    body: { allowCustomQuestions: true },
+  });
+  expect(on.status).toBe(200);
+  expect((await json<ProfileBody>(on)).profile.allowCustomQuestions).toBe(true);
+
+  // Reaching the public site payload is the whole point of the flag.
+  const site = await api("GET", `/astrologers/${astro.profile.slug}/site`);
+  expect((await json<SiteBody>(site)).allowCustomQuestions).toBe(true);
+
+  const publicProfile = await api("GET", `/astrologers/${astro.profile.slug}`);
+  expect((await json<PublicProfileBody>(publicProfile)).profile.allowCustomQuestions).toBe(true);
+
+  const off = await api("PATCH", "/astrologers/me", {
+    token: astro.accessToken,
+    body: { allowCustomQuestions: false },
+  });
+  expect(off.status).toBe(200);
+  expect((await json<ProfileBody>(off)).profile.allowCustomQuestions).toBe(false);
+});
+
+test("PATCH /astrologers/me rejects a non-boolean allowCustomQuestions", async () => {
+  const res = await api("PATCH", "/astrologers/me", {
+    token: astro.accessToken,
+    body: { allowCustomQuestions: "yes" },
+  });
+  expect(res.status).toBe(400);
+});
+
+test("PATCH /astrologers/me rejects allowCustomQuestions from a client", async () => {
+  const clientEmail = testEmail("cq");
+  const reg = await registerUser({
+    name: "Plain Client",
+    email: clientEmail,
+    username: uniqueUsername(),
+    password: "ClientPass1",
+  });
+  const { accessToken } = await json<{ accessToken: string }>(reg);
+
+  const res = await api("PATCH", "/astrologers/me", {
+    token: accessToken,
+    body: { allowCustomQuestions: true },
+  });
+  expect(res.status).toBe(403);
+  await cleanupUsers(clientEmail);
 });

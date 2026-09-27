@@ -1,4 +1,6 @@
 import { Router } from "express";
+import { randomBytes } from "node:crypto";
+import { UserRole } from "@prisma/client";
 import { db } from "../../prisma/db";
 import {
   hashPassword,
@@ -36,6 +38,7 @@ const router = Router();
  *               username: { type: string, pattern: '^[a-z0-9_]{3,30}$' }
  *               password: { type: string, minLength: 8, maxLength: 72 }
  *               profileImageUrl: { type: string, format: uri, nullable: true }
+ *               role: { type: string, enum: [client, astrologer], default: client }
  *     responses:
  *       201:
  *         description: User created
@@ -45,6 +48,7 @@ const router = Router();
  *               type: object
  *               properties:
  *                 user: { $ref: '#/components/schemas/User' }
+ *                 profile: { $ref: '#/components/schemas/AstrologerProfile', nullable: true }
  *                 accessToken: { type: string }
  *                 refreshToken: { type: string }
  *       400: { description: Validation error }
@@ -71,17 +75,37 @@ router.post("/register", async (req, res) => {
     }
 
     const passwordHash = await hashPassword(data.password);
+    const wantsAstrologer = data.role === "astrologer";
 
-    const user = await db.user.create({
-      data: {
-        name: data.name,
-        email: data.email,
-        mobile: data.mobile,
-        username: data.username,
-        profileImageUrl: data.profileImageUrl,
-        passwordHash,
-      },
-      select: { id: true, name: true, email: true, username: true, role: true },
+    // Astrologer signups are created with their role and an (unreviewed,
+    // Pending) profile right away so the rest of the app can treat them as a
+    // provider immediately. The 7-step /register application is submitted
+    // separately and is what actually gates approval.
+    const { user, profile } = await db.$transaction(async (tx) => {
+      const created = await tx.user.create({
+        data: {
+          name: data.name,
+          email: data.email,
+          mobile: data.mobile,
+          username: data.username,
+          profileImageUrl: data.profileImageUrl,
+          passwordHash,
+          role: wantsAstrologer ? UserRole.Astrologer : UserRole.Client,
+        },
+        select: { id: true, name: true, email: true, username: true, role: true },
+      });
+
+      if (!wantsAstrologer) return { user: created, profile: null };
+
+      const createdProfile = await tx.astrologerProfile.create({
+        data: {
+          userId: created.id,
+          slug: `astro-${randomBytes(4).toString("hex")}`,
+          timezone: "Asia/Kolkata",
+        },
+      });
+
+      return { user: created, profile: createdProfile };
     });
 
     const refreshToken = generateRefreshToken();
@@ -94,7 +118,7 @@ router.post("/register", async (req, res) => {
 
     const accessToken = await signAccessToken(user.id, user.role, session.id);
 
-    return res.status(201).json({ user, accessToken, refreshToken });
+    return res.status(201).json({ user, profile, accessToken, refreshToken });
   } catch (err) {
     console.error("Register error:", err);
     return res.status(500).json({ error: "Internal server error" });

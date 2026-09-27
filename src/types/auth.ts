@@ -10,6 +10,10 @@ export const registerSchema = z.object({
     .regex(/[A-Z]/, "At least one uppercase letter")
     .regex(/[0-9]/, "At least one number"),
   profileImageUrl: z.string().url().optional(),
+  /** Which side of the product the user is signing up for. Astrologer
+   * signups get a profile created immediately; the /register application
+   * (profile/services/bank/KYC) is submitted separately afterwards. */
+  role: z.enum(["client", "astrologer"]).default("client"),
 });
 export type RegisterInput = z.infer<typeof registerSchema>;
 

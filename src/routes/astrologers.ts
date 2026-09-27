@@ -4,13 +4,16 @@ import { randomBytes } from "crypto";
 import { requireAuth } from "../lib/middleware";
 import { signAccessToken } from "../lib/auth";
 import { db } from "../../prisma/db";
-import { UserRole, BookingStatus } from "@prisma/client";
+import { UserRole, BookingStatus, AstrologerApplicationStatus } from "@prisma/client";
+import type { Prisma } from "@prisma/client";
 import { sendValidationError, paramString } from "../lib/http";
 import {
   updateAstrologerProfileSchema,
   updatePricingSchema,
   updateTemplateDataSchema,
+  astrologerApplicationSchema,
 } from "../types/astrologer";
+import type { AstrologerApplicationInput } from "../types/astrologer";
 import {
   createAvailabilityRuleSchema,
   createExceptionSchema,
@@ -298,6 +301,156 @@ router.post("/onboard", requireAuth, async (req, res) => {
 });
 
 /**
+ * Fields the /register form collects that also have a home on
+ * AstrologerProfile. Mirroring them here means a submitted application
+ * immediately shows up on the public profile and the dashboard.
+ */
+function profileFieldsFromApplication(data: AstrologerApplicationInput) {
+  const languages = data.languages
+    .split(",")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .slice(0, 10);
+
+  const bio = data.detailedIntro || data.shortBio || data.aboutMe || null;
+
+  return {
+    bio,
+    specializations: data.specialties,
+    languages,
+    experienceYears: data.yearsExperience > 0 ? data.yearsExperience : null,
+  };
+}
+
+/**
+ * @openapi
+ * /astrologers/application:
+ *   get:
+ *     tags: [Astrologers]
+ *     summary: Get own astrologer registration application
+ *     description: >
+ *       Returns the submission made through the 7-step /register form, or
+ *       `application: null` when the user has not submitted one yet. The
+ *       frontend uses the null check to decide whether to show /register.
+ *       The payload contains bank/KYC details, so it is only ever returned to
+ *       the user who submitted it.
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Application or null
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 application:
+ *                   type: object
+ *                   nullable: true
+ *                   properties:
+ *                     id: { type: string, format: uuid }
+ *                     status: { type: string, enum: [Submitted, Approved, Rejected] }
+ *                     payload: { type: object }
+ *                     submittedAt: { type: string, format: date-time }
+ *       401: { description: Unauthorized }
+ *       500: { description: Internal server error }
+ */
+router.get("/application", requireAuth, async (req, res) => {
+  try {
+    const application = await db.astrologerApplication.findUnique({
+      where: { userId: req.user!.id },
+    });
+
+    return res.json({ application });
+  } catch (err) {
+    console.error("Get astrologer application error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/**
+ * @openapi
+ * /astrologers/application:
+ *   post:
+ *     tags: [Astrologers]
+ *     summary: Submit (or re-submit) the astrologer registration application
+ *     description: >
+ *       Idempotent upsert keyed on the current user — submitting again
+ *       overwrites the previous application, which is what "Edit application"
+ *       on the confirmation screen does. Also mirrors the profile-level fields
+ *       (bio, specializations, languages, experience) onto the profile.
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [payload]
+ *             properties:
+ *               payload: { type: object, description: The 7-step form's field set }
+ *     responses:
+ *       201:
+ *         description: Application submitted
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 application: { type: object }
+ *                 profile: { $ref: '#/components/schemas/AstrologerProfile' }
+ *       400: { description: Validation error }
+ *       401: { description: Unauthorized }
+ *       403: { description: User is not an astrologer }
+ *       404: { description: No astrologer profile found }
+ *       500: { description: Internal server error }
+ */
+router.post("/application", requireAuth, async (req, res) => {
+  try {
+    const parsed = astrologerApplicationSchema.safeParse(
+      (req.body as { payload?: unknown })?.payload,
+    );
+    if (!parsed.success) return sendValidationError(res, parsed.error);
+
+    const data = parsed.data;
+    const userId = req.user!.id;
+
+    const profile = await db.astrologerProfile.findUnique({ where: { userId } });
+    if (!profile) {
+      const user = await getCurrentUser(userId);
+      if (!user) return res.status(403).json({ error: "User is not an astrologer" });
+      return res.status(404).json({ error: "Astrologer profile not found" });
+    }
+
+    // A re-submission restarts the review, so staff see the latest answers.
+    const status =
+      profile.status === "Approved" ? AstrologerApplicationStatus.Approved : AstrologerApplicationStatus.Submitted;
+
+    // `.passthrough()` leaves an index signature on the inferred type, which
+    // Prisma's Json input can't see through; the value is plain JSONB here.
+    const payload = data as unknown as Prisma.InputJsonValue;
+
+    const [application, updatedProfile] = await db.$transaction([
+      db.astrologerApplication.upsert({
+        where: { userId },
+        create: { userId, payload, status },
+        update: { payload, status, submittedAt: new Date() },
+      }),
+      db.astrologerProfile.update({
+        where: { userId },
+        data: profileFieldsFromApplication(data),
+      }),
+    ]);
+
+    return res.status(201).json({ application, profile: updatedProfile });
+  } catch (err) {
+    console.error("Submit astrologer application error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/**
  * @openapi
  * /astrologers/me:
  *   patch:
@@ -317,6 +470,9 @@ router.post("/onboard", requireAuth, async (req, res) => {
  *               languages: { type: array, items: { type: string }, maxItems: 10 }
  *               experienceYears: { type: integer, minimum: 0, maximum: 80 }
  *               timezone: { type: string }
+ *               allowCustomQuestions:
+ *                 type: boolean
+ *                 description: Show a free-text question box on the public site
  *     responses:
  *       200: { description: Profile updated }
  *       400: { description: Validation error }
@@ -1309,6 +1465,7 @@ router.get("/:slug/site", async (req, res) => {
         slotDurationMinutes: true,
         isAcceptingQuestions: true,
         isAcceptingBookings: true,
+        allowCustomQuestions: true,
         user: { select: { name: true, username: true, profileImageUrl: true } },
       },
     });
@@ -1331,6 +1488,7 @@ router.get("/:slug/site", async (req, res) => {
       slotDurationMinutes: profile.slotDurationMinutes,
       isAcceptingQuestions: profile.isAcceptingQuestions,
       isAcceptingBookings: profile.isAcceptingBookings,
+      allowCustomQuestions: profile.allowCustomQuestions,
     });
   } catch (err) {
     console.error("Get public site error:", err);
@@ -1496,6 +1654,7 @@ router.get("/:slug", async (req, res) => {
         callPricePerSlotPaise: true,
         isAcceptingQuestions: true,
         isAcceptingBookings: true,
+        allowCustomQuestions: true,
         templateData: true,
         user: {
           select: {
