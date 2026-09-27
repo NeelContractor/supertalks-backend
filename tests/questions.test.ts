@@ -177,83 +177,90 @@ describe("question chat", () => {
     await cleanupUsers(soloEmail);
   });
 
-  test("closed threads reject new messages", async () => {
-    const soloEmail = testEmail("solo2");
-    const solo = await registerUser({
-      name: "Solo Client 2",
-      email: soloEmail,
-      username: uniqueUsername(),
-      password: "ClientPass1",
-    });
-    const soloToken = (await json<{ accessToken: string }>(solo)).accessToken;
-    const question = await createDirect(astrologer.profile.id, soloToken);
-    // Pay first so the astrologer is allowed to reject a queued question.
-    const intent = await api("POST", `/questions/${question.id}/messages`, {
-      token: soloToken,
-      body: { body: "Getting it into a rejectable state." },
-    });
-    const paymentId = (await json<{ payment: { id: string } }>(intent)).payment.id;
-    await api("POST", `/payments/${paymentId}/complete`, { token: soloToken });
+  // DISABLED (commented out) for now — reject/unreject is paused, so the
+  // endpoint this used to set up a closed thread no longer exists. The only
+  // other way to close a thread is to answer the question, if this coverage
+  // is wanted again while reject stays off.
+  // test("closed threads reject new messages", async () => {
+  //   const soloEmail = testEmail("solo2");
+  //   const solo = await registerUser({
+  //     name: "Solo Client 2",
+  //     email: soloEmail,
+  //     username: uniqueUsername(),
+  //     password: "ClientPass1",
+  //   });
+  //   const soloToken = (await json<{ accessToken: string }>(solo)).accessToken;
+  //   const question = await createDirect(astrologer.profile.id, soloToken);
+  //   // Pay first so the astrologer is allowed to reject a queued question.
+  //   const intent = await api("POST", `/questions/${question.id}/messages`, {
+  //     token: soloToken,
+  //     body: { body: "Getting it into a rejectable state." },
+  //   });
+  //   const paymentId = (await json<{ payment: { id: string } }>(intent)).payment.id;
+  //   await api("POST", `/payments/${paymentId}/complete`, { token: soloToken });
+  //
+  //   await api("PATCH", `/questions/${question.id}/reject`, {
+  //     token: astrologer.accessToken,
+  //     body: { reason: "Not my area" },
+  //   });
+  //   const send = await api("POST", `/questions/${question.id}/messages`, {
+  //     token: soloToken,
+  //     body: { body: "hello?" },
+  //   });
+  //   expect(send.status).toBe(403);
+  //   await cleanupUsers(soloEmail);
+  // });
 
-    await api("PATCH", `/questions/${question.id}/reject`, {
-      token: astrologer.accessToken,
-      body: { reason: "Not my area" },
-    });
-    const send = await api("POST", `/questions/${question.id}/messages`, {
-      token: soloToken,
-      body: { body: "hello?" },
-    });
-    expect(send.status).toBe(403);
-    await cleanupUsers(soloEmail);
-  });
+  // DISABLED (commented out) for now — reject/unreject is paused. Restore with
+  // PATCH /questions/:id/reject and /:id/unreject in src/routes/questions.ts.
+  // test("astrologer can unreject a rejected question back to queued", async () => {
+  //   const soloEmail = testEmail("solo3");
+  //   const solo = await registerUser({
+  //     name: "Solo Client 3",
+  //     email: soloEmail,
+  //     username: uniqueUsername(),
+  //     password: "ClientPass1",
+  //   });
+  //   const soloToken = (await json<{ accessToken: string }>(solo)).accessToken;
+  //   const question = await createDirect(astrologer.profile.id, soloToken);
+  //   const intent = await api("POST", `/questions/${question.id}/messages`, {
+  //     token: soloToken,
+  //     body: { body: "Getting it into a rejectable state." },
+  //   });
+  //   const paymentId = (await json<{ payment: { id: string } }>(intent)).payment.id;
+  //   await api("POST", `/payments/${paymentId}/complete`, { token: soloToken });
+  //
+  //   const rejected = await api("PATCH", `/questions/${question.id}/reject`, {
+  //     token: astrologer.accessToken,
+  //     body: { reason: "Not my area" },
+  //   });
+  //   expect(rejected.status).toBe(200);
+  //   expect((await json<{ question: { status: string } }>(rejected)).question.status).toBe("Rejected");
+  //
+  //   const unrejected = await api("PATCH", `/questions/${question.id}/unreject`, {
+  //     token: astrologer.accessToken,
+  //   });
+  //   expect(unrejected.status).toBe(200);
+  //   const body = await json<{ question: { status: string; rejectionReason: string | null } }>(unrejected);
+  //   expect(body.question.status).toBe("Queued");
+  //   expect(body.question.rejectionReason).toBeNull();
+  //
+  //   // Client can message (creates a new payment intent) and astrologer can reply again.
+  //   const intent2 = await api("POST", `/questions/${question.id}/messages`, {
+  //     token: soloToken,
+  //     body: { body: "Never mind, still curious." },
+  //   });
+  //   expect(intent2.status).toBe(201);
+  //   await cleanupUsers(soloEmail);
+  // });
 
-  test("astrologer can unreject a rejected question back to queued", async () => {
-    const soloEmail = testEmail("solo3");
-    const solo = await registerUser({
-      name: "Solo Client 3",
-      email: soloEmail,
-      username: uniqueUsername(),
-      password: "ClientPass1",
-    });
-    const soloToken = (await json<{ accessToken: string }>(solo)).accessToken;
-    const question = await createDirect(astrologer.profile.id, soloToken);
-    const intent = await api("POST", `/questions/${question.id}/messages`, {
-      token: soloToken,
-      body: { body: "Getting it into a rejectable state." },
-    });
-    const paymentId = (await json<{ payment: { id: string } }>(intent)).payment.id;
-    await api("POST", `/payments/${paymentId}/complete`, { token: soloToken });
-
-    const rejected = await api("PATCH", `/questions/${question.id}/reject`, {
-      token: astrologer.accessToken,
-      body: { reason: "Not my area" },
-    });
-    expect(rejected.status).toBe(200);
-    expect((await json<{ question: { status: string } }>(rejected)).question.status).toBe("Rejected");
-
-    const unrejected = await api("PATCH", `/questions/${question.id}/unreject`, {
-      token: astrologer.accessToken,
-    });
-    expect(unrejected.status).toBe(200);
-    const body = await json<{ question: { status: string; rejectionReason: string | null } }>(unrejected);
-    expect(body.question.status).toBe("Queued");
-    expect(body.question.rejectionReason).toBeNull();
-
-    // Client can message (creates a new payment intent) and astrologer can reply again.
-    const intent2 = await api("POST", `/questions/${question.id}/messages`, {
-      token: soloToken,
-      body: { body: "Never mind, still curious." },
-    });
-    expect(intent2.status).toBe(201);
-    await cleanupUsers(soloEmail);
-  });
-
-  test("unreject on a queued question is rejected with 403", async () => {
-    const res = await api("PATCH", `/questions/${questionId}/unreject`, {
-      token: astrologer.accessToken,
-    });
-    expect(res.status).toBe(403);
-  });
+  // DISABLED (commented out) for now — reject/unreject is paused.
+  // test("unreject on a queued question is rejected with 403", async () => {
+  //   const res = await api("PATCH", `/questions/${questionId}/unreject`, {
+  //     token: astrologer.accessToken,
+  //   });
+  //   expect(res.status).toBe(403);
+  // });
 
   test("message requires a body", async () => {
     const send = await api("POST", `/questions/${questionId}/messages`, {

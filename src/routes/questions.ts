@@ -3,11 +3,12 @@ import { requireAuth, requireCustomer } from "../lib/middleware";
 import { db } from "../../prisma/db";
 import { sendValidationError, paramString } from "../lib/http";
 import { broadcastMessage, broadcastQuestionUpdate } from "../lib/realtime";
+import { resolveService } from "../lib/site";
 import { PaymentFor, PaymentStatus, Prisma, QuestionStatus, UserRole } from "@prisma/client";
 import {
   createQuestionSchema,
   answerQuestionSchema,
-  rejectQuestionSchema,
+  // rejectQuestionSchema, // DISABLED with the reject/unreject routes
   sendQuestionMessageSchema,
   orderQuestionsSchema,
 } from "../types/questions";
@@ -107,6 +108,13 @@ async function createMessage(
  *         schema:
  *           type: string
  *           enum: [client, astrologer]
+ *       - in: query
+ *         name: sort
+ *         required: false
+ *         description: Order by creation time. Defaults to latest.
+ *         schema:
+ *           type: string
+ *           enum: [latest, oldest]
  *     responses:
  *       200: { description: List of questions }
  *       400: { description: Invalid status filter }
@@ -115,7 +123,7 @@ async function createMessage(
  */
 router.get("/", requireAuth, async (req, res) => {
   try {
-    const { status, role } = req.query;
+    const { status, role, sort } = req.query;
     const userId = req.user!.id;
 
     const statusFilter =
@@ -160,13 +168,18 @@ router.get("/", requireAuth, async (req, res) => {
     const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 10, 1), 100);
     const offset = Math.max(parseInt(req.query.offset as string) || 0, 0);
 
+    // Unknown/missing values fall back to `latest` so old clients keep working.
+    const sortOrder = sort === "oldest" ? "asc" : "desc";
+
     // Base where scoped to the user (no status filter) for computing tab counts
     const { status: _status, ...countWhere } = where;
 
     const [questions, total, allTotal, queued, answered, rejected, refunded] = await Promise.all([
       db.question.findMany({
         where,
-        orderBy: { createdAt: "desc" },
+        // `id` is a stable tiebreaker so offset pagination can't repeat or
+        // skip rows when several questions share a createdAt.
+        orderBy: [{ createdAt: sortOrder }, { id: sortOrder }],
         take: limit,
         skip: offset,
         include: {
@@ -328,7 +341,13 @@ router.post("/batch", requireCustomer, async (req, res) => {
 
     const astrologer = await db.astrologerProfile.findUnique({
       where: { id: astrologerId },
-      select: { id: true, isAcceptingQuestions: true, questionPricePaise: true },
+      select: {
+        id: true,
+        isAcceptingQuestions: true,
+        questionPricePaise: true,
+        templateId: true,
+        templateData: true,
+      },
     });
     if (!astrologer) return res.status(404).json({ error: "Astrologer not found" });
 
@@ -340,18 +359,40 @@ router.post("/batch", requireCustomer, async (req, res) => {
       return res.status(400).json({ error: "Astrologer has not set a question price" });
     }
 
-    const totalPaise = astrologer.questionPricePaise * items.length;
+    // A service card only names the service; each price is read from the
+    // astrologer's own site document. A service priced 0 (or an item with no
+    // serviceId) falls back to the profile's standard question price.
+    const priced: { item: (typeof items)[number]; pricePaise: number }[] = [];
+    for (const item of items) {
+      if (!item.serviceId) {
+        priced.push({ item, pricePaise: astrologer.questionPricePaise });
+        continue;
+      }
+      const service = await resolveService(astrologer, item.serviceId);
+      if (!service) {
+        return res.status(400).json({ error: "This service is no longer available" });
+      }
+      if (service.type !== "question") {
+        return res.status(400).json({ error: "This service must be booked as a session" });
+      }
+      priced.push({
+        item,
+        pricePaise: service.pricePaise > 0 ? service.pricePaise : astrologer.questionPricePaise,
+      });
+    }
+
+    const totalPaise = priced.reduce((sum, p) => sum + p.pricePaise, 0);
 
     const result = await db.$transaction(async (tx) => {
       const questions = await Promise.all(
-        items.map((item) =>
+        priced.map(({ item, pricePaise }) =>
           tx.question.create({
             data: {
               clientId,
               astrologerId,
               questionText: item.questionText,
               category: item.category ?? null,
-              pricePaise: astrologer.questionPricePaise,
+              pricePaise,
               status: QuestionStatus.PendingPayment,
             },
             select: {
@@ -524,6 +565,11 @@ router.patch("/:id/answer", requireAuth, async (req, res) => {
 });
 
 /**
+ * DISABLED (commented out) for now — reject/unreject is paused.
+ * Restore together with `rejectQuestionSchema` in src/types/questions.ts, the
+ * questionsApi.reject/unreject client methods, and the Reject/Unreject buttons
+ * in frontend/src/pages/Questions.tsx.
+ *
  * @openapi
  * /questions/{id}/reject:
  *   patch:
@@ -552,42 +598,45 @@ router.patch("/:id/answer", requireAuth, async (req, res) => {
  *       404: { description: Question not found }
  *       500: { description: Internal server error }
  */
-router.patch("/:id/reject", requireAuth, async (req, res) => {
-  try {
-    const parsed = rejectQuestionSchema.safeParse(req.body ?? {});
-    if (!parsed.success) return sendValidationError(res, parsed.error);
+// router.patch("/:id/reject", requireAuth, async (req, res) {
+//   try {
+//     const parsed = rejectQuestionSchema.safeParse(req.body ?? {});
+//     if (!parsed.success) return sendValidationError(res, parsed.error);
 
-    const userId = req.user!.id;
-    const question = await getQuestion(req.params.id);
-    if (!question) return res.status(404).json({ error: "Question not found" });
+//     const userId = req.user!.id;
+//     const question = await getQuestion(req.params.id);
+//     if (!question) return res.status(404).json({ error: "Question not found" });
 
-    const profileId = await getAstrologerProfileId(userId);
-    if (!profileId || question.astrologerId !== profileId) {
-      return res.status(403).json({ error: "Only the assigned astrologer can reject" });
-    }
+//     const profileId = await getAstrologerProfileId(userId);
+//     if (!profileId || question.astrologerId !== profileId) {
+//       return res.status(403).json({ error: "Only the assigned astrologer can reject" });
+//     }
 
-    if (!inStatus(question.status, ANSWERABLE)) {
-      return res.status(403).json({ error: "Question is not rejectable" });
-    }
+//     if (!inStatus(question.status, ANSWERABLE)) {
+//       return res.status(403).json({ error: "Question is not rejectable" });
+//     }
 
-    const updated = await db.question.update({
-      where: { id: question.id },
-      data: {
-        status: QuestionStatus.Rejected,
-        rejectionReason: parsed.data.reason,
-      },
-    });
+//     const updated = await db.question.update({
+//       where: { id: question.id },
+//       data: {
+//         status: QuestionStatus.Rejected,
+//         rejectionReason: parsed.data.reason,
+//       },
+//     });
 
-    await broadcastQuestionUpdate(question.id);
+//     await broadcastQuestionUpdate(question.id);
 
-    return res.json({ question: updated });
-  } catch (err) {
-    console.error("Reject question error:", err);
-    return res.status(500).json({ error: "Internal server error" });
-  }
-});
+//     return res.json({ question: updated });
+//   } catch (err) {
+//     console.error("Reject question error:", err);
+//     return res.status(500).json({ error: "Internal server error" });
+//   }
+// });
 
 /**
+ * DISABLED (commented out) for now — reject/unreject is paused. See the
+ * /reject block above for the full restore checklist.
+ *
  * @openapi
  * /questions/{id}/unreject:
  *   patch:
@@ -608,37 +657,37 @@ router.patch("/:id/reject", requireAuth, async (req, res) => {
  *       404: { description: Question not found }
  *       500: { description: Internal server error }
  */
-router.patch("/:id/unreject", requireAuth, async (req, res) => {
-  try {
-    const userId = req.user!.id;
-    const question = await getQuestion(req.params.id);
-    if (!question) return res.status(404).json({ error: "Question not found" });
+// router.patch("/:id/unreject", requireAuth, async (req, res) => {
+//   try {
+//     const userId = req.user!.id;
+//     const question = await getQuestion(req.params.id);
+//     if (!question) return res.status(404).json({ error: "Question not found" });
 
-    const profileId = await getAstrologerProfileId(userId);
-    if (!profileId || question.astrologerId !== profileId) {
-      return res.status(403).json({ error: "Only the assigned astrologer can unreject" });
-    }
+//     const profileId = await getAstrologerProfileId(userId);
+//     if (!profileId || question.astrologerId !== profileId) {
+//       return res.status(403).json({ error: "Only the assigned astrologer can unreject" });
+//     }
 
-    if (question.status !== QuestionStatus.Rejected) {
-      return res.status(403).json({ error: "Only rejected questions can be unrejected" });
-    }
+//     if (question.status !== QuestionStatus.Rejected) {
+//       return res.status(403).json({ error: "Only rejected questions can be unrejected" });
+//     }
 
-    const updated = await db.question.update({
-      where: { id: question.id },
-      data: {
-        status: QuestionStatus.Queued,
-        rejectionReason: null,
-      },
-    });
+//     const updated = await db.question.update({
+//       where: { id: question.id },
+//       data: {
+//         status: QuestionStatus.Queued,
+//         rejectionReason: null,
+//       },
+//     });
 
-    await broadcastQuestionUpdate(question.id);
+//     await broadcastQuestionUpdate(question.id);
 
-    return res.json({ question: updated });
-  } catch (err) {
-    console.error("Unreject question error:", err);
-    return res.status(500).json({ error: "Internal server error" });
-  }
-});
+//     return res.json({ question: updated });
+//   } catch (err) {
+//     console.error("Unreject question error:", err);
+//     return res.status(500).json({ error: "Internal server error" });
+//   }
+// });
 
 /**
  * @openapi

@@ -62,6 +62,9 @@ export const createExceptionSchema = z
 export const createBookingSchema = z.object({
   astrologerId: z.string().uuid(),
   startAt: z.string().datetime(), // ISO 8601 UTC, computed client-side from a chosen local slot
+  // `services:<index>` from a public-site service card. Names the service; the
+  // price is resolved server-side from the astrologoger's stored site.
+  serviceId: z.string().trim().max(60).optional(),
 });
 
 export const rescheduleBookingSchema = z.object({

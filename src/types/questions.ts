@@ -11,9 +11,13 @@ export const answerQuestionSchema = z.object({
   answerText: z.string().trim().min(1).max(5000),
 });
 
-export const rejectQuestionSchema = z.object({
-  reason: z.string().max(300),
-});
+// DISABLED (commented out) for now — reject/unreject is paused. Restore
+// together with PATCH /questions/:id/reject and /:id/unreject, the
+// questionsApi.reject/unreject client methods, and the Reject/Unreject buttons
+// in frontend/src/pages/Questions.tsx.
+// export const rejectQuestionSchema = z.object({
+//   reason: z.string().max(300),
+// });
 
 export const sendQuestionMessageSchema = z.object({
   body: z.string().trim().min(1).max(2000),
@@ -36,6 +40,10 @@ export const orderQuestionsSchema = z.object({
       z.object({
         questionText: z.string().trim().min(3).max(1000),
         category: z.string().trim().max(40).optional(),
+        // `services:<index>` from a public-site service card. Identifies which
+        // service was bought; the price itself is resolved server-side from the
+        // astrologer's stored site, never taken from the request.
+        serviceId: z.string().trim().max(60).optional(),
       })
     )
     .min(1)

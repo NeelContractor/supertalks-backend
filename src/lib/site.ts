@@ -379,19 +379,38 @@ export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
               default:
                 "Understand your unique birth chart, planetary influences, strengths, challenges, and important life patterns through a personalized Vedic astrology reading.",
             },
+            // What the "Pay" button on the card buys: a written question or a
+            // bookable slot. A slot service must be booked (date + time), a
+            // question service is sent straight to the astrologer.
+            type: { type: "select", options: ["question", "slot"], default: "question" },
+            // Per-service override. 0 means "charge my standard price", so
+            // services saved before this field existed keep working.
+            pricePaise: { type: "number", min: 0, default: 0 },
+            // Only meaningful for slot services. 0 means "use my standard slot
+            // length".
+            durationMinutes: { type: "number", min: 0, max: 240, default: 0 },
           },
           default: [
             {
               title: "Birth Chart Reading",
               body: "Understand your unique birth chart, planetary influences, strengths, challenges, and important life patterns through a personalized Vedic astrology reading.",
+              type: "slot",
+              pricePaise: 0,
+              durationMinutes: 60,
             },
             {
               title: "Career & Finance",
               body: "Gain insights into your career path, professional opportunities, financial patterns, and favorable periods for making important decisions.",
+              type: "question",
+              pricePaise: 0,
+              durationMinutes: 0,
             },
             {
               title: "Marriage & Relationships",
               body: "Explore relationship compatibility, marriage prospects, partnership patterns, and planetary influences affecting your personal relationships.",
+              type: "slot",
+              pricePaise: 0,
+              durationMinutes: 45,
             },
           ],
         },
@@ -688,4 +707,75 @@ export async function buildSite(profile: {
   const schema = getTemplateSchema(template);
   const site = mergeTemplate(schema, profile.templateData);
   return { template, schema, site };
+}
+
+// ---- Per-service pricing -------------------------------------------------
+//
+// A service card's "Pay" button sends only *which* service was chosen
+// (`services:<index>`). The price is always resolved here from the
+// astrologer's own stored site document, so a client can never talk the
+// server into a different amount.
+
+export type ServiceKind = "question" | "slot";
+
+export interface ResolvedService {
+  serviceId: string;
+  index: number;
+  title: string;
+  type: ServiceKind;
+  /** 0 means "fall back to the astrologer's standard price". */
+  pricePaise: number;
+  /** 0 means "fall back to the astrologer's standard slot length". */
+  durationMinutes: number;
+}
+
+const SERVICE_ID_PREFIX = "services:";
+
+export function serviceIdForIndex(index: number): string {
+  return `${SERVICE_ID_PREFIX}${index}`;
+}
+
+export function serviceIndexFromId(serviceId: string): number | null {
+  if (!serviceId.startsWith(SERVICE_ID_PREFIX)) return null;
+  const raw = serviceId.slice(SERVICE_ID_PREFIX.length);
+  if (!/^\d+$/.test(raw)) return null;
+  const index = Number(raw);
+  return Number.isSafeInteger(index) && index >= 0 ? index : null;
+}
+
+function positiveIntOrZero(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 0;
+  return Math.trunc(value);
+}
+
+/**
+ * Look up one service on an astrologoger by its `services:<index>` id.
+ * Returns null when the id is malformed, out of range, or the profile has no
+ * Services section — callers must treat that as "no such service".
+ */
+export async function resolveService(
+  profile: { templateId: string | null; templateData: unknown },
+  serviceId: string
+): Promise<ResolvedService | null> {
+  const index = serviceIndexFromId(serviceId);
+  if (index === null) return null;
+
+  const { site } = await buildSite(profile);
+  const section = site.sections.find((s) => s.type === "ServicesSection");
+  if (!section) return null;
+
+  const items = section.props.items;
+  if (!Array.isArray(items)) return null;
+
+  const item = items[index];
+  if (!isPlainObject(item)) return null;
+
+  return {
+    serviceId,
+    index,
+    title: typeof item.title === "string" ? item.title : "",
+    type: item.type === "slot" ? "slot" : "question",
+    pricePaise: positiveIntOrZero(item.pricePaise),
+    durationMinutes: positiveIntOrZero(item.durationMinutes),
+  };
 }

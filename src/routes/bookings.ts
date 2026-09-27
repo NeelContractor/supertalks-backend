@@ -15,6 +15,7 @@ import {
   cancelBookingSchema,
 } from "../types/scheduling";
 import { openSlotsForRules } from "../lib/scheduling";
+import { resolveService } from "../lib/site";
 
 const router = Router();
 
@@ -68,6 +69,13 @@ function parseId(document: string | string[] | undefined) {
  *         schema:
  *           type: string
  *           enum: [client, astrologer]
+ *       - in: query
+ *         name: sort
+ *         required: false
+ *         description: Order by session start time. Defaults to latest.
+ *         schema:
+ *           type: string
+ *           enum: [latest, oldest]
  *     responses:
  *       200: { description: List of bookings }
  *       400: { description: Invalid status filter }
@@ -76,7 +84,7 @@ function parseId(document: string | string[] | undefined) {
  */
 router.get("/", requireAuth, async (req, res) => {
   try {
-    const { status, role } = req.query;
+    const { status, role, sort } = req.query;
     const userId = req.user!.id;
 
     const statusFilter =
@@ -115,13 +123,18 @@ router.get("/", requireAuth, async (req, res) => {
     const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 10, 1), 100);
     const offset = Math.max(parseInt(req.query.offset as string) || 0, 0);
 
+    // Unknown/missing values fall back to `latest` so old clients keep working.
+    const sortOrder = sort === "oldest" ? "asc" : "desc";
+
     // Base where scoped to the user (no status filter) for computing tab counts
     const { status: _status, ...countWhere } = where;
 
     const [bookings, total, allTotal, confirmed, completed, cancelled, pending] = await Promise.all([
       db.booking.findMany({
         where,
-        orderBy: { startAt: "desc" },
+        // Bookings are a schedule, so "latest" means the latest session start.
+        // `id` is a stable tiebreaker for offset pagination on equal startAt.
+        orderBy: [{ startAt: sortOrder }, { id: sortOrder }],
         take: limit,
         skip: offset,
 include: {
@@ -220,7 +233,7 @@ router.post("/", requireCustomer, async (req, res) => {
     }
 
     const clientId = req.user!.id;
-    const { astrologerId, startAt } = parsed.data;
+    const { astrologerId, startAt, serviceId } = parsed.data;
 
     const start = new Date(startAt);
     const dateKey = start.toISOString().slice(0, 10);
@@ -287,7 +300,23 @@ router.post("/", requireCustomer, async (req, res) => {
       return res.status(409).json({ error: "Slot is no longer available" });
     }
 
-    const pricePaise = astrologer.callPricePerSlotPaise;
+    // A service card only names the service; the price is read from the
+    // astrologoger's own site document. Priced 0 (or no serviceId) falls back
+    // to the profile's standard per-slot price. The booked length stays the
+    // profile's slot duration so availability and buffers keep lining up.
+    let pricePaise = astrologer.callPricePerSlotPaise;
+    if (serviceId) {
+      const service = await resolveService(astrologer, serviceId);
+      if (!service) {
+        return res.status(400).json({ error: "This service is no longer available" });
+      }
+      if (service.type !== "slot") {
+        return res.status(400).json({ error: "This service is not a bookable session" });
+      }
+      if (service.pricePaise > 0) {
+        pricePaise = service.pricePaise;
+      }
+    }
     const needsPayment = pricePaise > 0;
 
     const { booking, payment } = await db.$transaction(async (tx) => {
