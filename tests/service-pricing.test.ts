@@ -237,6 +237,23 @@ describe("slot service pricing", () => {
     expect(res.status).toBe(400);
     expect((await json<ErrorBody>(res)).error).toMatch(/no longer available/i);
   });
+
+  test("birth details sent with the booking are stored on the booking", async () => {
+    const clientDetails = {
+      clientName: "Jane Doe",
+      birthDate: "1990-01-01",
+      birthTime: "14:30",
+      birthPlace: "Mumbai, India",
+    };
+    const res = await bookSlot(5, { serviceId: "services:1", clientDetails });
+    expect(res.status).toBe(201);
+    const body = await json<{ booking: { id: string } }>(res);
+    const booking = await db.booking.findUnique({
+      where: { id: body.booking.id },
+      select: { clientDetails: true },
+    });
+    expect(booking?.clientDetails).toMatchObject(clientDetails);
+  });
 });
 
 describe("services saved before the per-service fields existed", () => {

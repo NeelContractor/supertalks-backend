@@ -244,6 +244,7 @@ model Booking {
   paymentId          String?       @map("payment_id") @db.Uuid
   meetingLink        String?       @map("meeting_link")
   clientNote         String?       @map("client_note")
+  clientDetails      Json?         @map("client_details")
   cancelledBy        String?       @map("cancelled_by")
   cancellationReason String?       @map("cancellation_reason")
   createdAt          DateTime      @default(now()) @map("created_at")

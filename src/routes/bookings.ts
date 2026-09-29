@@ -8,6 +8,7 @@ import {
   BookingStatus,
   PaymentFor,
   PaymentStatus,
+  Prisma,
 } from "@prisma/client";
 import {
   createBookingSchema,
@@ -233,7 +234,7 @@ router.post("/", requireCustomer, async (req, res) => {
     }
 
     const clientId = req.user!.id;
-    const { astrologerId, startAt, serviceId } = parsed.data;
+    const { astrologerId, startAt, serviceId, clientDetails } = parsed.data;
 
     const start = new Date(startAt);
     const dateKey = start.toISOString().slice(0, 10);
@@ -354,6 +355,9 @@ router.post("/", requireCustomer, async (req, res) => {
           pricePaise,
           paymentId,
           status: needsPayment ? BookingStatus.PendingPayment : BookingStatus.Confirmed,
+          ...(clientDetails
+            ? { clientDetails: clientDetails as unknown as Prisma.InputJsonValue }
+            : {}),
         },
       });
 

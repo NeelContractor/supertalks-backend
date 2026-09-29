@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { questionClientDetailsSchema } from "./questions";
 
 const timeRegex = /^\d{2}:\d{2}(:\d{2})?$/;
 
@@ -65,6 +66,9 @@ export const createBookingSchema = z.object({
   // `services:<index>` from a public-site service card. Names the service; the
   // price is resolved server-side from the astrologoger's stored site.
   serviceId: z.string().trim().max(60).optional(),
+  // Optional birth/identity details, mirroring the question flow so the
+  // astrologer has the same context going into a live session.
+  clientDetails: questionClientDetailsSchema.optional(),
 });
 
 export const rescheduleBookingSchema = z.object({
