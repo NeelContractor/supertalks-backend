@@ -12,9 +12,12 @@ import {
   hashToken,
   validateRefreshToken,
   revokeAllRefreshTokens,
+  createAuthHandoff,
+  consumeAuthHandoff,
 } from "../lib/auth";
 import { sendValidationError } from "../lib/http";
-import { registerSchema, loginSchema } from "../types/auth";
+import { requireAuth } from "../lib/middleware";
+import { registerSchema, loginSchema, handoffExchangeSchema } from "../types/auth";
 
 const router = Router();
 
@@ -282,6 +285,120 @@ router.post("/refresh", async (req, res) => {
     return res.json({ accessToken, refreshToken: newRefreshToken });
   } catch (err) {
     console.error("Refresh error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/**
+ * @openapi
+ * /auth/handoff:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Mint a one-time code so another app can adopt this session
+ *     description: >
+ *       The public astrologer site calls this while signed in, then redirects
+ *       the client to the dashboard app with the code in the URL. Only the hash
+ *       is stored server-side and the code expires after 60 seconds.
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Handoff code minted
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 code: { type: string }
+ *                 expiresAt: { type: string, format: date-time }
+ *       401: { description: Missing or invalid token }
+ */
+router.post("/handoff", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user!.id;
+    const { code, expiresAt } = await createAuthHandoff(userId);
+    return res.json({ code, expiresAt });
+  } catch (err) {
+    console.error("Handoff mint error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/**
+ * @openapi
+ * /auth/handoff/exchange:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Redeem a handoff code for a fresh token pair
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [code]
+ *             properties:
+ *               code: { type: string }
+ *     responses:
+ *       200:
+ *         description: New token pair issued for the handoff user
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 user: { $ref: '#/components/schemas/User' }
+ *                 accessToken: { type: string }
+ *                 refreshToken: { type: string }
+ *       400: { description: Missing code }
+ *       401: { description: Invalid, expired, or already-used code }
+ *       403: { description: Account deactivated }
+ *       500: { description: Internal server error }
+ */
+router.post("/handoff/exchange", async (req, res) => {
+  try {
+    const parsed = handoffExchangeSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return sendValidationError(res, parsed.error);
+    }
+
+    const handoff = await consumeAuthHandoff(parsed.data.code);
+    if (!handoff) {
+      return res.status(401).json({ error: "Invalid, expired, or already-used handoff code" });
+    }
+
+    const user = await db.user.findUnique({
+      where: { id: handoff.userId },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        username: true,
+        role: true,
+        isActive: true,
+      },
+    });
+    if (!user || !user.isActive) {
+      return res.status(403).json({ error: "Account is deactivated" });
+    }
+
+    // Matches sign-in: fresh single session for the receiving app, revoking a
+    // same-account session elsewhere (the app's single-active-session policy).
+    await revokeAllRefreshTokens(user.id);
+
+    const refreshToken = generateRefreshToken();
+    const session = await storeRefreshToken(
+      user.id,
+      refreshToken,
+      req.headers["user-agent"],
+      req.ip
+    );
+
+    const accessToken = await signAccessToken(user.id, user.role, session.id);
+
+    return res.json({ user, accessToken, refreshToken });
+  } catch (err) {
+    console.error("Handoff exchange error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });

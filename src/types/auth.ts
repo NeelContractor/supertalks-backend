@@ -32,3 +32,8 @@ export const googleAuthSchema = z.object({
 export const refreshSchema = z.object({
   refreshToken: z.string().min(20),
 });
+
+export const handoffExchangeSchema = z.object({
+  code: z.string().trim().min(32, "Invalid handoff code"),
+});
+export type HandoffExchangeInput = z.infer<typeof handoffExchangeSchema>;

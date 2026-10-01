@@ -106,3 +106,38 @@ export async function isSessionActive(sessionId: string): Promise<boolean> {
     session && session.revokedAt === null && session.expiresAt > new Date()
   );
 }
+
+// ---- one-time cross-app auth handoff ------------------------------------
+//
+// Lets a signed-in session on one app be adopted by another app on a different
+// origin. The issuing app posts the code to the receiving app's URL; the
+// receiving app redeems it for a fresh token pair. Only the hash is stored, and
+// a code is single-use and short-lived.
+const AUTH_HANDOFF_TTL_MS = 60_000;
+
+/** Mint a high-entropy code (sha256 hashed in the DB) for the given user. */
+export async function createAuthHandoff(userId: string) {
+  // Opportunistic sweep so the table can't accumulate stale rows.
+  await db.authHandoff.deleteMany({ where: { expiresAt: { lt: new Date() } } });
+
+  const code = crypto.randomBytes(32).toString("hex");
+  const expiresAt = new Date(Date.now() + AUTH_HANDOFF_TTL_MS);
+  await db.authHandoff.create({
+    data: { userId, codeHash: hashToken(code), expiresAt },
+  });
+  return { code, expiresAt };
+}
+
+/**
+ * Redeem a handoff code exactly once. Returns the owning user id on success or
+ * null when the code was already used, expired, or never existed.
+ */
+export async function consumeAuthHandoff(code: string) {
+  const codeHash = hashToken(code);
+  const claimed = await db.authHandoff.updateMany({
+    where: { codeHash, consumedAt: null, expiresAt: { gt: new Date() } },
+    data: { consumedAt: new Date() },
+  });
+  if (claimed.count !== 1) return null;
+  return db.authHandoff.findUnique({ where: { codeHash } });
+}

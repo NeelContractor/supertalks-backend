@@ -42,6 +42,8 @@ async function getQuestion(id: string | string[] | undefined) {
       astrologer: {
         select: {
           id: true,
+          // The client dashboard links to the astrologer's public page.
+          slug: true,
           user: { select: { name: true } },
         },
       },
@@ -187,6 +189,8 @@ router.get("/", requireAuth, async (req, res) => {
           astrologer: {
             select: {
               id: true,
+              // The client dashboard links to the astrologer's public page.
+              slug: true,
               user: { select: { name: true } },
             },
           },

@@ -77,6 +77,16 @@ function parseId(document: string | string[] | undefined) {
  *         schema:
  *           type: string
  *           enum: [latest, oldest]
+ *       - in: query
+ *         name: upcoming
+ *         required: false
+ *         description: >
+ *           Return only the soonest sessions that have not started yet
+ *           (status Confirmed or Rescheduled, startAt in the future), ordered
+ *           by nearest start first. Backs the dashboard navbar reminder. The
+ *           `status` and `sort` params are ignored when this is set.
+ *         schema:
+ *           type: boolean
  *     responses:
  *       200: { description: List of bookings }
  *       400: { description: Invalid status filter }
@@ -85,7 +95,7 @@ function parseId(document: string | string[] | undefined) {
  */
 router.get("/", requireAuth, async (req, res) => {
   try {
-    const { status, role, sort } = req.query;
+    const { status, role, sort, upcoming } = req.query;
     const userId = req.user!.id;
 
     const statusFilter =
@@ -119,23 +129,37 @@ router.get("/", requireAuth, async (req, res) => {
       where.clientId = userId;
     }
 
-    if (statusFilter) where.status = statusFilter;
+    // `upcoming=true` is a schedule query, not a status-tab query: the
+    // consumer wants "what is my next session", which is the *soonest* future
+    // booking. `latest` sorts startAt descending (furthest first), so an
+    // upcoming list has to force ascending order and drop the past.
+    const wantUpcoming = upcoming === "true" || upcoming === "1";
+    if (wantUpcoming) {
+      where.status = { in: [...SLOT_BLOCKING] };
+      where.startAt = { gt: new Date() };
+    } else if (statusFilter) {
+      where.status = statusFilter;
+    }
 
     const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 10, 1), 100);
     const offset = Math.max(parseInt(req.query.offset as string) || 0, 0);
 
     // Unknown/missing values fall back to `latest` so old clients keep working.
     const sortOrder = sort === "oldest" ? "asc" : "desc";
+    // Nearest start first for `upcoming`; `id` breaks ties on equal startAt.
+    const orderBy: Prisma.BookingOrderByWithRelationInput[] = wantUpcoming
+      ? [{ startAt: "asc" }, { id: "asc" }]
+      : [{ startAt: sortOrder }, { id: sortOrder }];
 
     // Base where scoped to the user (no status filter) for computing tab counts
-    const { status: _status, ...countWhere } = where;
+    const { status: _status, startAt: _startAt, ...countWhere } = where;
 
     const [bookings, total, allTotal, confirmed, completed, cancelled, pending] = await Promise.all([
       db.booking.findMany({
         where,
         // Bookings are a schedule, so "latest" means the latest session start.
         // `id` is a stable tiebreaker for offset pagination on equal startAt.
-        orderBy: [{ startAt: sortOrder }, { id: sortOrder }],
+        orderBy,
         take: limit,
         skip: offset,
 include: {

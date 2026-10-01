@@ -96,6 +96,7 @@ model User {
   astrologerApplication AstrologerApplication?
   oauthAccounts     OauthAccount[]
   refreshTokens     RefreshToken[]
+  authHandoffs      AuthHandoff[]
   bookingsAsClient  Booking[]           @relation("ClientBookings")
   questionsAsClient Question[]          @relation("ClientQuestions")
   questionMessages  QuestionMessage[]
@@ -130,6 +131,26 @@ model RefreshToken {
   user User @relation(fields: [userId], references: [id])
 
   @@map("refresh_tokens")
+}
+
+/**
+ * One-time, short-lived code that lets a signed-in session on one app
+ * (e.g. the public astrologer site) be adopted by another app (the client
+ * dashboard) without the tokens ever appearing in a URL. Only the SHA-256
+ * hash of the code is stored; the raw code is returned once at mint time and
+ * can be redeemed exactly once before it expires.
+ */
+model AuthHandoff {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  codeHash   String    @unique @map("code_hash")
+  expiresAt  DateTime  @map("expires_at")
+  consumedAt DateTime? @map("consumed_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("auth_handoffs")
 }
 
 model WebsiteTemplate {
