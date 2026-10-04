@@ -1,5 +1,4 @@
 import { Router } from "express";
-import { randomBytes } from "node:crypto";
 import { UserRole } from "@prisma/client";
 import { db } from "../../prisma/db";
 import {
@@ -15,6 +14,11 @@ import {
   createAuthHandoff,
   consumeAuthHandoff,
 } from "../lib/auth";
+import {
+  isUniqueConstraintError,
+  runWithUniqueSlug,
+  uniqueConstraintField,
+} from "../lib/unique-slug";
 import { sendValidationError } from "../lib/http";
 import { requireAuth } from "../lib/middleware";
 import { registerSchema, loginSchema, handoffExchangeSchema } from "../types/auth";
@@ -84,32 +88,34 @@ router.post("/register", async (req, res) => {
     // Pending) profile right away so the rest of the app can treat them as a
     // provider immediately. The 7-step /register application is submitted
     // separately and is what actually gates approval.
-    const { user, profile } = await db.$transaction(async (tx) => {
-      const created = await tx.user.create({
-        data: {
-          name: data.name,
-          email: data.email,
-          mobile: data.mobile,
-          username: data.username,
-          profileImageUrl: data.profileImageUrl,
-          passwordHash,
-          role: wantsAstrologer ? UserRole.Astrologer : UserRole.Client,
-        },
-        select: { id: true, name: true, email: true, username: true, role: true },
-      });
+    //
+    // The profile slug is the astrologer's public identity and is
+    // unique-indexed, so a collision retries with a fresh one instead of
+    // failing the signup.
+    const { user, profile } = await runWithUniqueSlug((slug) =>
+      db.$transaction(async (tx) => {
+        const created = await tx.user.create({
+          data: {
+            name: data.name,
+            email: data.email,
+            mobile: data.mobile,
+            username: data.username,
+            profileImageUrl: data.profileImageUrl,
+            passwordHash,
+            role: wantsAstrologer ? UserRole.Astrologer : UserRole.Client,
+          },
+          select: { id: true, name: true, email: true, username: true, role: true },
+        });
 
-      if (!wantsAstrologer) return { user: created, profile: null };
+        if (!wantsAstrologer) return { user: created, profile: null };
 
-      const createdProfile = await tx.astrologerProfile.create({
-        data: {
-          userId: created.id,
-          slug: `astro-${randomBytes(4).toString("hex")}`,
-          timezone: "Asia/Kolkata",
-        },
-      });
+        const createdProfile = await tx.astrologerProfile.create({
+          data: { userId: created.id, slug, timezone: "Asia/Kolkata" },
+        });
 
-      return { user: created, profile: createdProfile };
-    });
+        return { user: created, profile: createdProfile };
+      }),
+    );
 
     const refreshToken = generateRefreshToken();
     const session = await storeRefreshToken(
@@ -123,6 +129,15 @@ router.post("/register", async (req, res) => {
 
     return res.status(201).json({ user, profile, accessToken, refreshToken });
   } catch (err) {
+    // The pre-check above cannot see a signup that commits a microsecond later,
+    // so the unique index is the real arbiter. Losing that race must read as the
+    // same 409 the pre-check produces, not as a server error.
+    if (isUniqueConstraintError(err)) {
+      const field = uniqueConstraintField(err);
+      const label =
+        field === "username" || field === "email" ? field : "email or username";
+      return res.status(409).json({ error: `${label} already taken` });
+    }
     console.error("Register error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }

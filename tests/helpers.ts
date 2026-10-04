@@ -33,6 +33,8 @@ export async function registerUser(body: {
   email: string;
   username: string;
   password: string;
+  /** Astrologer signups also get a profile; defaults to a client signup. */
+  role?: "client" | "astrologer";
 }) {
   await ready;
   return fetch(`${base}/auth/register`, {

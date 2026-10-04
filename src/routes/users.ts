@@ -132,7 +132,7 @@ router.get("/me/stats", requireAuth, async (req, res) => {
           where: { astrologerId, status: "Confirmed", startAt: { gt: now } },
         }),
         db.booking.count({ where: { astrologerId, status: "Completed" } }),
-        db.booking.count({ where: { astrologerId } }),
+        db.booking.count({ where: { astrologerId, status: { not: "PendingPayment" } } }),
         db.booking.aggregate({
           where: { astrologerId, status: "Completed" },
           _sum: { pricePaise: true },

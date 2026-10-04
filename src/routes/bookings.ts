@@ -133,12 +133,29 @@ router.get("/", requireAuth, async (req, res) => {
     // consumer wants "what is my next session", which is the *soonest* future
     // booking. `latest` sorts startAt descending (furthest first), so an
     // upcoming list has to force ascending order and drop the past.
+    const now = new Date();
     const wantUpcoming = upcoming === "true" || upcoming === "1";
+    // The Upcoming tab means "sessions still ahead of us". A Confirmed booking
+    // whose start time has gone by has already run, so it drops out of this tab
+    // (it stays in All, where it can still be completed or cancelled) instead of
+    // lingering under a heading that says otherwise.
+    const upcomingTab = statusFilter === BookingStatus.Confirmed;
     if (wantUpcoming) {
       where.status = { in: [...SLOT_BLOCKING] };
-      where.startAt = { gt: new Date() };
+      where.startAt = { gt: now };
     } else if (statusFilter) {
       where.status = statusFilter;
+      if (upcomingTab) where.startAt = { gt: now };
+    } else if (viewAs === UserRole.Astrologer) {
+      // An unpaid booking is only a slot hold on the checkout screen, and the
+      // same thing the public slots endpoint already ignores. From the
+      // provider's side it is not a session: it blocks nothing, earns nothing,
+      // and an abandoned or failed checkout never reverts it (only the payment
+      // is marked failed), so leaving it visible would accumulate phantom
+      // bookings forever. The client still sees theirs - that hold is what they
+      // have to pay or abandon. Same rule as unpaid questions in
+      // routes/questions.ts.
+      where.status = { not: BookingStatus.PendingPayment };
     }
 
     const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 10, 1), 100);
@@ -151,8 +168,15 @@ router.get("/", requireAuth, async (req, res) => {
       ? [{ startAt: "asc" }, { id: "asc" }]
       : [{ startAt: sortOrder }, { id: sortOrder }];
 
-    // Base where scoped to the user (no status filter) for computing tab counts
-    const { status: _status, startAt: _startAt, ...countWhere } = where;
+    // Base where scoped to the user (no status filter) for computing tab
+    // counts. The tab counts describe the rows this caller can actually see, so
+    // they repeat the astrologer default exclusion - otherwise "All (N)" would
+    // keep counting the unpaid bookings that were just filtered out of the list.
+    const hideUnpaid = viewAs === UserRole.Astrologer && !statusFilter && !wantUpcoming;
+    const { status: _status, startAt: _startAt, ...scopedWhere } = where;
+    const countWhere: Record<string, unknown> = hideUnpaid
+      ? { ...scopedWhere, status: { not: BookingStatus.PendingPayment } }
+      : scopedWhere;
 
     const [bookings, total, allTotal, confirmed, completed, cancelled, pending] = await Promise.all([
       db.booking.findMany({
@@ -179,6 +203,9 @@ include: {
         where: {
           ...countWhere,
           status: { in: ["Confirmed", "Rescheduled"] as BookingStatus[] },
+          // Same rule as the tab itself, so the badge can never promise more
+          // sessions than the tab will list.
+          startAt: { gt: now },
         },
       }),
       db.booking.count({ where: { ...countWhere, status: "Completed" } }),
@@ -190,12 +217,14 @@ include: {
           },
         },
       }),
-      db.booking.count({
-        where: {
-          ...countWhere,
-          status: { in: ["PendingPayment"] as BookingStatus[] },
-        },
-      }),
+      // No pending-payment tab exists for an astrologer (their default view has
+      // no such rows), so the count is zero rather than a number they cannot
+      // act on.
+      hideUnpaid
+        ? 0
+        : db.booking.count({
+            where: { ...countWhere, status: { in: ["PendingPayment"] as BookingStatus[] } },
+          }),
     ]);
 
     return res.json({

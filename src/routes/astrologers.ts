@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
-import { randomBytes } from "crypto";
 import { requireAuth } from "../lib/middleware";
+import { runWithUniqueSlug } from "../lib/unique-slug";
 import { signAccessToken } from "../lib/auth";
 import { db } from "../../prisma/db";
 import { UserRole, BookingStatus, AstrologerApplicationStatus } from "@prisma/client";
@@ -110,6 +110,9 @@ async function getCurrentUser(userId: string) {
       username: true,
       role: true,
       profileImageUrl: true,
+      mobile: true,
+      emailVerified: true,
+      mobileVerified: true,
     },
   });
 
@@ -221,7 +224,9 @@ router.get("/me/stats", requireAuth, async (req, res) => {
         where: { astrologerId, status: "Confirmed", startAt: { gt: now } },
       }),
       db.booking.count({ where: { astrologerId, status: "Completed" } }),
-      db.booking.count({ where: { astrologerId } }),
+      // Unpaid holds are not sessions, so they stay out of the lifetime total
+      // for the same reason the booking list hides them from astrologers.
+      db.booking.count({ where: { astrologerId, status: { not: BookingStatus.PendingPayment } } }),
       db.booking.aggregate({
         where: { astrologerId, status: "Completed" },
         _sum: { pricePaise: true },
@@ -274,22 +279,24 @@ router.post("/onboard", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "Already an astrologer" });
     }
 
-    const slug = `astro-${randomBytes(4).toString("hex")}`;
-
-    const [updatedUser, profile] = await db.$transaction([
-      db.user.update({
-        where: { id: user.id },
-        data: { role: UserRole.Astrologer },
-        select: { id: true, name: true, email: true, username: true, role: true, profileImageUrl: true },
-      }),
-      db.astrologerProfile.create({
-        data: {
-          userId: user.id,
-          slug,
-          timezone: "Asia/Kolkata",
-        },
-      }),
-    ]);
+    // The slug is the astrologer's public identity: unique-indexed, and a
+    // collision retries with a fresh one rather than 500-ing the request.
+    const [updatedUser, profile] = await runWithUniqueSlug((slug) =>
+      db.$transaction([
+        db.user.update({
+          where: { id: user.id },
+          data: { role: UserRole.Astrologer },
+          select: { id: true, name: true, email: true, username: true, role: true, profileImageUrl: true },
+        }),
+        db.astrologerProfile.create({
+          data: {
+            userId: user.id,
+            slug,
+            timezone: "Asia/Kolkata",
+          },
+        }),
+      ]),
+    );
 
     const accessToken = await signAccessToken(updatedUser.id, updatedUser.role);
 

@@ -217,3 +217,4 @@ test("bulk availability template rejects overlapping windows", async () => {
   });
   expect(res.status).toBe(400);
 });
+

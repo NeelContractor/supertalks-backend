@@ -119,8 +119,8 @@ describe("GET /bookings?upcoming=true", () => {
 
   test("tab counts are unaffected by the upcoming filter", async () => {
     const body = await listUpcoming();
-    // Confirmed + Rescheduled across the whole scope, past rows included.
-    expect(body.counts.Confirmed).toBeGreaterThanOrEqual(3);
+    // The Upcoming badge counts sessions still ahead of us, matching the tab.
+    expect(body.counts.Confirmed).toBe(3);
     expect(body.counts.Completed).toBeGreaterThanOrEqual(1);
   });
 
@@ -141,5 +141,112 @@ describe("GET /bookings?upcoming=true", () => {
   test("requires authentication", async () => {
     const res = await api("GET", "/bookings?upcoming=true");
     expect(res.status).toBe(401);
+  });
+});
+
+/**
+ * An unpaid booking is a checkout hold, not a session: it blocks no slot and is
+ * never reverted when a checkout is abandoned, so the provider side must not
+ * list or count it. The client keeps seeing theirs - that hold is what they
+ * still have to pay.
+ */
+describe("GET /bookings (default list)", () => {
+  test("hides unpaid holds from the astrologer", async () => {
+    const res = await api("GET", "/bookings?limit=50&role=astrologer", {
+      token: astrologer.accessToken,
+    });
+    expect(res.status).toBe(200);
+    const body = await json<{ bookings: Row[]; counts: Record<string, number> }>(res);
+    const mine = body.bookings.filter((b) => Object.values(ids).includes(b.id));
+    expect(mine.map((b) => b.id)).not.toContain(ids.pending);
+    expect(mine).toHaveLength(Object.keys(ids).length - 1);
+  });
+
+  test("tab counts match the rows the astrologer can actually see", async () => {
+    const res = await api("GET", "/bookings?limit=50&role=astrologer", {
+      token: astrologer.accessToken,
+    });
+    expect(res.status).toBe(200);
+    const body = await json<{ bookings: Row[]; counts: Record<string, number> }>(res);
+    expect(body.counts.Pending).toBe(0);
+    // Fresh astrologer: every row here belongs to this file's seeds.
+    expect(body.counts.all).toBe(body.bookings.length);
+  });
+
+  test("an explicit status filter still reaches the astrologer's unpaid holds", async () => {
+    const res = await api("GET", "/bookings?status=PendingPayment&role=astrologer", {
+      token: astrologer.accessToken,
+    });
+    expect(res.status).toBe(200);
+    const body = await json<{ bookings: Row[] }>(res);
+    expect(body.bookings.map((b) => b.id)).toContain(ids.pending);
+  });
+
+  test("the client still sees the hold they have to pay", async () => {
+    const res = await api("GET", "/bookings?limit=50&role=client", { token: clientToken });
+    expect(res.status).toBe(200);
+    const body = await json<{ bookings: Row[]; counts: Record<string, number> }>(res);
+    expect(body.bookings.map((b) => b.id)).toContain(ids.pending);
+    expect(body.counts.Pending).toBe(1);
+  });
+
+  test("astrologer stats leave unpaid holds out of the lifetime total", async () => {
+    const res = await api("GET", "/astrologers/me/stats", { token: astrologer.accessToken });
+    expect(res.status).toBe(200);
+    const stats = await json<{ totalBookings: number }>(res);
+    const list = await api("GET", "/bookings?limit=100&role=astrologer", {
+      token: astrologer.accessToken,
+    });
+    const body = await json<{ bookings: Row[] }>(list);
+    expect(stats.totalBookings).toBe(body.bookings.length);
+  });
+});
+
+describe("GET /bookings?status=Confirmed (Upcoming tab)", () => {
+  async function listConfirmed(query = "", role = "client", token = clientToken) {
+    const qs = new URLSearchParams({ status: "Confirmed", limit: "50", role });
+    const res = await api("GET", `/bookings?${qs}${query}`, { token });
+    expect(res.status).toBe(200);
+    return json<{ bookings: Row[]; total: number; counts: Record<string, number> }>(res);
+  }
+
+  test("omits a Confirmed booking whose start time has passed", async () => {
+    const body = await listConfirmed();
+    const returned = new Set(body.bookings.map((b) => b.id));
+    expect(returned.has(ids.past)).toBe(false);
+    expect(returned.has(ids.soonest)).toBe(true);
+    expect(returned.has(ids.latest)).toBe(true);
+  });
+
+  test("keeps the passed session in the unfiltered list", async () => {
+    const res = await api("GET", "/bookings?limit=50&role=client", { token: clientToken });
+    expect(res.status).toBe(200);
+    const body = await json<{ bookings: Row[] }>(res);
+    expect(new Set(body.bookings.map((b) => b.id))).toEqual(new Set(Object.values(ids)));
+  });
+
+  test("the badge counts future Confirmed and Rescheduled sessions only", async () => {
+    const body = await listConfirmed();
+    // The tab covers Confirmed + Rescheduled, so the badge is the future rows of
+    // both (soonest, middle=Rescheduled, latest) while this narrower query only
+    // returns the Confirmed ones. It must never be lower than the list.
+    expect(body.counts.Confirmed).toBe(3);
+    expect(body.counts.Confirmed).toBeGreaterThanOrEqual(body.total);
+  });
+
+  test("applies to the astrologer view too", async () => {
+    const body = await listConfirmed("", "astrologer", astrologer.accessToken);
+    const returned = new Set(body.bookings.map((b) => b.id));
+    expect(returned.has(ids.past)).toBe(false);
+    expect(returned.has(ids.soonest)).toBe(true);
+  });
+
+  test("other status tabs are untouched", async () => {
+    const res = await api("GET", "/bookings?status=Completed&limit=50&role=client", {
+      token: clientToken,
+    });
+    expect(res.status).toBe(200);
+    const body = await json<{ bookings: Row[] }>(res);
+    expect(body.bookings.map((b) => b.id)).toEqual([ids.completed]);
   });
 });
