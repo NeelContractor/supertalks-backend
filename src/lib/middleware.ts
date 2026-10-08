@@ -15,6 +15,34 @@ declare global {
   }
 }
 
+/**
+ * Attach req.user when a valid Bearer token is present, but let the request
+ * through anonymously otherwise. For endpoints that are public yet can
+ * personalize a response (the slot picker flagging the caller's own
+ * in-progress checkout). A bad or expired token degrades to anonymous
+ * instead of failing the request.
+ */
+export async function optionalAuth(
+  req: Request,
+  _res: Response,
+  next: NextFunction
+) {
+  const header = req.headers.authorization;
+  if (!header || !header.startsWith("Bearer ")) return next();
+
+  const token = header.slice("Bearer ".length).trim();
+  try {
+    const payload = await verifyAccessToken(token);
+    if (!payload.sub) return next();
+    const sid = payload.sid as string | undefined;
+    if (sid && !(await isSessionActive(sid))) return next();
+    req.user = { id: payload.sub as string, role: (payload.role as string) || "" };
+  } catch {
+    // Anonymous - this endpoint never rejects on a bad token.
+  }
+  next();
+}
+
 export async function requireAuth(
   req: Request,
   res: Response,

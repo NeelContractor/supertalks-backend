@@ -10,6 +10,7 @@ import {
   json,
 } from "./helpers";
 import { signAccessToken } from "../src/lib/auth";
+import { db } from "../prisma/db";
 
 interface MeBody {
   user: { id: string; name: string; role: string };
@@ -145,10 +146,21 @@ test("re-booking a slot with an unfinished payment resumes the same booking", as
   expect(body.payment?.id).toBe(bookingPaymentId ?? undefined);
 });
 
-test("abandoned pending payment does not hide the slot", async () => {
-  const slotsRes = await api("GET", `/astrologers/${astro.profile.slug}/slots?date=${monday}`);
-  const slotsBody = await json<SlotsBody>(slotsRes);
-  expect(slotsBody.slots.some((s) => s.startAt === bookingStartAt)).toBe(true);
+test("an active checkout hold hides the slot, an expired hold frees it", async () => {
+  // While the first client is on the payment page, the slot is off the menu.
+  const heldRes = await api("GET", `/astrologers/${astro.profile.slug}/slots?date=${monday}`);
+  const heldBody = await json<SlotsBody>(heldRes);
+  expect(heldBody.slots.some((s) => s.startAt === bookingStartAt)).toBe(false);
+
+  // Nobody paid and the hold ran out: the slot is bookable again (the same
+  // release happens automatically when a payment fails).
+  await db.booking.update({
+    where: { id: bookingId },
+    data: { holdExpiresAt: new Date(Date.now() - 1000) },
+  });
+  const freedRes = await api("GET", `/astrologers/${astro.profile.slug}/slots?date=${monday}`);
+  const freedBody = await json<SlotsBody>(freedRes);
+  expect(freedBody.slots.some((s) => s.startAt === bookingStartAt)).toBe(true);
 });
 
 test("settling a booking payment confirms the slot", async () => {
@@ -201,8 +213,10 @@ test("client booking of an off-schedule time is rejected with 409", async () => 
   expect(res.status).toBe(409);
 });
 
-test("non-client cannot create a booking", async () => {
-  const astroToken = await signAccessToken(astro.user.id, "Astrologer");
+test("a non-customer (admin) cannot create a booking", async () => {
+  // Astrologers are customers too (they can book other astrologers), so the
+  // gate protects against non-customer roles - i.e. Admin/internal - only.
+  const astroToken = await signAccessToken(astro.user.id, "Admin");
   const res = await fetch(`${getBaseUrl()}/bookings`, {
     method: "POST",
     headers: {

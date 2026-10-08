@@ -18,6 +18,7 @@ import {
   settlePayment,
   markPaymentFailed,
   serializePayment,
+  ensureBookingSlotClaimable,
 } from "../lib/settlement";
 import { z } from "zod";
 
@@ -136,6 +137,14 @@ router.post("/:paymentId/initiate", requireAuth, async (req, res) => {
     const returnTo = parsed.success ? parsed.data.returnTo : undefined;
     if (returnTo && !isAllowedReturnUrl(returnTo, cfg.gatewayBase)) {
       return res.status(400).json({ error: "Invalid return URL" });
+    }
+
+    // Don't send the payer to a payment page they cannot win: when the slot
+    // was already lost to someone else (or the checkout was cancelled), fail
+    // the intent here so no gateway order is created - and no money taken -
+    // in the first place.
+    if (!(await ensureBookingSlotClaimable(payment.id))) {
+      return res.status(409).json({ error: "Slot is no longer available" });
     }
 
     const base = phonePeBaseUrl();

@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import { requireAuth } from "../lib/middleware";
+import { requireAuth, optionalAuth } from "../lib/middleware";
 import { runWithUniqueSlug } from "../lib/unique-slug";
 import { signAccessToken } from "../lib/auth";
 import { db } from "../../prisma/db";
@@ -34,6 +34,7 @@ import {
   exceptionWindowMinutes,
   subtractWindow,
 } from "../lib/scheduling";
+import { slotClaimWhere, lockAstrologerBookings } from "../lib/booking-guards";
 
 const router = Router();
 
@@ -55,8 +56,6 @@ interface ExceptionConflict {
   endTime: string | null;
   reason: string | null;
 }
-
-const BOOKING_BLOCKING_STATUSES = [BookingStatus.Confirmed, BookingStatus.Rescheduled];
 
 /**
  * Exceptions that fall on `dayOfWeek` (today or later) whose window overlaps
@@ -959,22 +958,27 @@ router.patch(
         timeToMinutes(newStart),
         timeToMinutes(newEnd)
       );
-      if (clashes.length > 0) {
-        if (resolve !== "remove-exceptions") {
-          return res.status(409).json({
-            error: "This availability clashes with an exception on that day",
-            code: "EXCEPTION_CONFLICT",
-            conflicts: clashes,
-          });
-        }
-        await db.availabilityException.deleteMany({
-          where: { id: { in: clashes.map((c) => c.exceptionId) } },
+      if (clashes.length > 0 && resolve !== "remove-exceptions") {
+        return res.status(409).json({
+          error: "This availability clashes with an exception on that day",
+          code: "EXCEPTION_CONFLICT",
+          conflicts: clashes,
         });
       }
 
-      const rule = await db.availabilityRule.update({
-        where: { id: existing.id },
-        data,
+      // Reshaping availability serializes with booking writes, so a create
+      // holding the lock cannot commit a slot this update just removed.
+      const rule = await db.$transaction(async (tx) => {
+        await lockAstrologerBookings(tx, profile.id);
+        if (clashes.length > 0) {
+          await tx.availabilityException.deleteMany({
+            where: { id: { in: clashes.map((c) => c.exceptionId) } },
+          });
+        }
+        return tx.availabilityRule.update({
+          where: { id: existing.id },
+          data,
+        });
       });
 
       return res.json({ rule });
@@ -1029,7 +1033,12 @@ router.delete(
       });
       if (!existing) return res.status(404).json({ error: "Availability rule not found" });
 
-      await db.availabilityRule.delete({ where: { id: existing.id } });
+      // Shrinking availability serializes with booking writes, so a create
+      // holding the lock cannot commit a slot this delete just removed.
+      await db.$transaction(async (tx) => {
+        await lockAstrologerBookings(tx, profile.id);
+        await tx.availabilityRule.delete({ where: { id: existing.id } });
+      });
       return res.json({ message: "Availability rule deleted" });
     } catch (err) {
       console.error("Delete availability rule error:", err);
@@ -1132,58 +1141,49 @@ router.post("/me/exceptions", requireAuth, async (req, res) => {
     const excStartAt = new Date(dayStart.getTime() + excStartMin * 60000);
     const excEndAt = new Date(dayStart.getTime() + excEndMin * 60000);
 
-    // A booked slot can never be blocked/adjusted away: the client already owns it.
-    const booked = await db.booking.findMany({
-      where: {
-        astrologerId: profile.id,
-        status: { in: BOOKING_BLOCKING_STATUSES },
-        startAt: { lt: excEndAt },
-        endAt: { gt: excStartAt },
-      },
-      select: { id: true, startAt: true, endAt: true },
-    });
-    if (booked.length > 0) {
-      return res.status(409).json({
-        error:
-          "This exception overlaps a session already booked by a client. Reschedule or cancel that booking first.",
-        code: "BOOKING_CONFLICT",
-        bookings: booked.map((b) => ({
-          id: b.id,
-          startAt: b.startAt.toISOString(),
-          endAt: b.endAt.toISOString(),
-        })),
-      });
-    }
+    const outcome = await db.$transaction(async (tx) => {
+      // Serialize with booking writes: the booked-slot check and the block
+      // itself must be atomic, or a create holding the lock could commit a
+      // booking into this very window between the two.
+      await lockAstrologerBookings(tx, profile.id);
 
-    const rules = await db.availabilityRule.findMany({
-      where: { astrologerId: profile.id, dayOfWeek, isActive: true },
-      select: { id: true, dayOfWeek: true, startTime: true, endTime: true },
-    });
-    const clashes: RuleConflict[] = rules
-      .filter((r) =>
-        windowsOverlap(
-          excStartMin,
-          excEndMin,
-          timeToMinutes(r.startTime),
-          timeToMinutes(r.endTime)
+      // A booked slot can never be blocked/adjusted away: the client already
+      // owns it - or is on the payment page for it (live checkout hold).
+      const booked = await tx.booking.findMany({
+        where: {
+          astrologerId: profile.id,
+          ...slotClaimWhere(),
+          startAt: { lt: excEndAt },
+          endAt: { gt: excStartAt },
+        },
+        select: { id: true, startAt: true, endAt: true },
+      });
+      if (booked.length > 0) return { kind: "booked" as const, booked };
+
+      const rules = await tx.availabilityRule.findMany({
+        where: { astrologerId: profile.id, dayOfWeek, isActive: true },
+        select: { id: true, dayOfWeek: true, startTime: true, endTime: true },
+      });
+      const clashes: RuleConflict[] = rules
+        .filter((r) =>
+          windowsOverlap(
+            excStartMin,
+            excEndMin,
+            timeToMinutes(r.startTime),
+            timeToMinutes(r.endTime)
+          )
         )
-      )
-      .map((r) => ({
-        ruleId: r.id,
-        dayOfWeek: r.dayOfWeek,
-        startTime: minutesToHhmm(timeToMinutes(r.startTime)),
-        endTime: minutesToHhmm(timeToMinutes(r.endTime)),
-      }));
+        .map((r) => ({
+          ruleId: r.id,
+          dayOfWeek: r.dayOfWeek,
+          startTime: minutesToHhmm(timeToMinutes(r.startTime)),
+          endTime: minutesToHhmm(timeToMinutes(r.endTime)),
+        }));
 
-    if (clashes.length > 0 && resolve !== "trim-rules") {
-      return res.status(409).json({
-        error: "This exception clashes with your availability",
-        code: "RULE_CONFLICT",
-        conflicts: clashes,
-      });
-    }
+      if (clashes.length > 0 && resolve !== "trim-rules") {
+        return { kind: "clash" as const, clashes };
+      }
 
-    const exception = await db.$transaction(async (tx) => {
       if (clashes.length > 0) {
         for (const clash of clashes) {
           const remaining = subtractWindow(
@@ -1219,7 +1219,7 @@ router.post("/me/exceptions", requireAuth, async (req, res) => {
         }
       }
 
-      return tx.availabilityException.upsert({
+      const exception = await tx.availabilityException.upsert({
         where: {
           astrologerId_date: {
             astrologerId: profile.id,
@@ -1241,9 +1241,29 @@ router.post("/me/exceptions", requireAuth, async (req, res) => {
           reason,
         },
       });
+      return { kind: "created" as const, exception };
     });
 
-    return res.status(201).json({ exception });
+    if (outcome.kind === "booked") {
+      return res.status(409).json({
+        error:
+          "This exception overlaps a session already booked by a client. Reschedule or cancel that booking first.",
+        code: "BOOKING_CONFLICT",
+        bookings: outcome.booked.map((b) => ({
+          id: b.id,
+          startAt: b.startAt.toISOString(),
+          endAt: b.endAt.toISOString(),
+        })),
+      });
+    }
+    if (outcome.kind === "clash") {
+      return res.status(409).json({
+        error: "This exception clashes with your availability",
+        code: "RULE_CONFLICT",
+        conflicts: outcome.clashes,
+      });
+    }
+    return res.status(201).json({ exception: outcome.exception });
   } catch (err) {
     console.error("Create exception error:", err);
     return res.status(500).json({ error: "Internal server error" });
@@ -1412,6 +1432,15 @@ router.get("/me/site", requireAuth, async (req, res) => {
         slug: true,
         templateId: true,
         templateData: true,
+        // The Customize tab seeds a service card's price and length from these
+        // when the astrologer has none of their own, so it needs them too —
+        // same fields the public read endpoint returns.
+        questionPricePaise: true,
+        callPricePerSlotPaise: true,
+        slotDurationMinutes: true,
+        isAcceptingQuestions: true,
+        isAcceptingBookings: true,
+        allowCustomQuestions: true,
         user: { select: { name: true, username: true, profileImageUrl: true } },
       },
     });
@@ -1430,6 +1459,12 @@ router.get("/me/site", requireAuth, async (req, res) => {
       templatePreviewImageUrl: template.previewImageUrl,
       schema,
       site,
+      questionPricePaise: profile.questionPricePaise,
+      callPricePerSlotPaise: profile.callPricePerSlotPaise,
+      slotDurationMinutes: profile.slotDurationMinutes,
+      isAcceptingQuestions: profile.isAcceptingQuestions,
+      isAcceptingBookings: profile.isAcceptingBookings,
+      allowCustomQuestions: profile.allowCustomQuestions,
     });
   } catch (err) {
     console.error("Get own site error:", err);
@@ -1538,7 +1573,7 @@ router.get("/:slug/site", async (req, res) => {
  *       404: { description: Astrologer not found }
  *       500: { description: Internal server error }
  */
-router.get("/:slug/slots", async (req, res) => {
+router.get("/:slug/slots", optionalAuth, async (req, res) => {
   try {
     const { date } = req.query;
     if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
@@ -1546,7 +1581,7 @@ router.get("/:slug/slots", async (req, res) => {
     }
 
     const profile = await db.astrologerProfile.findUnique({
-      where: { slug: req.params.slug },
+      where: { slug: String(req.params.slug) },
       include: {
         availabilityRules: { where: { isActive: true } },
         availabilityExceptions: { where: { date: new Date(`${date}T00:00:00`) } },
@@ -1564,28 +1599,69 @@ router.get("/:slug/slots", async (req, res) => {
       date
     );
 
-    // Hide slots that a settled booking already owns. PendingPayment holds are
-    // intentionally ignored so an abandoned checkout does not lock the slot.
+    // Hide slots that are claimed right now: a settled booking owns them, or
+    // a checkout hold is still running (an unpaid booking the payer is
+    // actively paying for). Holds expire, so an abandoned or failed checkout
+    // frees the slot again without any cleanup job. The caller's OWN pending
+    // booking is the one exception: it stays visible to them - flagged
+    // `yours` below - so their in-progress checkout doesn't look like a slot
+    // that silently vanished, while everyone else still sees it as taken.
+    const callerId = req.user?.id;
     const dayStart = new Date(`${date}T00:00:00.000Z`);
     const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
     const booked = await db.booking.findMany({
       where: {
         astrologerId: profile.id,
-        status: { in: [BookingStatus.Confirmed, BookingStatus.Rescheduled] },
+        ...(callerId
+          ? {
+              AND: [
+                slotClaimWhere(),
+                {
+                  NOT: {
+                    AND: [{ clientId: callerId }, { status: BookingStatus.PendingPayment }],
+                  },
+                },
+              ],
+            }
+          : slotClaimWhere()),
         startAt: { lt: dayEnd },
         endAt: { gt: dayStart },
       },
       select: { startAt: true, endAt: true },
     });
 
-    const slots = openSlots.filter(
-      (slot) =>
-        !booked.some(
+    // The caller's own unfinished checkouts, hold running or not - these are
+    // what get flagged `yours` in the response.
+    const mine = callerId
+      ? await db.booking.findMany({
+          where: {
+            astrologerId: profile.id,
+            clientId: callerId,
+            status: BookingStatus.PendingPayment,
+            startAt: { lt: dayEnd },
+            endAt: { gt: dayStart },
+          },
+          select: { startAt: true, endAt: true },
+        })
+      : [];
+
+    const slots = openSlots
+      .filter(
+        (slot) =>
+          !booked.some(
+            (b) =>
+              b.startAt.getTime() < new Date(slot.endAt).getTime() &&
+              b.endAt.getTime() > new Date(slot.startAt).getTime()
+          )
+      )
+      .map((slot) => {
+        const isMine = mine.some(
           (b) =>
             b.startAt.getTime() < new Date(slot.endAt).getTime() &&
             b.endAt.getTime() > new Date(slot.startAt).getTime()
-        )
-    );
+        );
+        return isMine ? { ...slot, yours: true } : slot;
+      });
 
     return res.json({ date, slots });
   } catch (err) {

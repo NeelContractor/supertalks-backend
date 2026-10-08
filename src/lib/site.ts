@@ -292,6 +292,17 @@ export function getTemplateSchema(template: { schema: unknown }): TemplateSchema
 // Default template definition
 // =============================================================
 
+/** Default price on a service card, in paise (₹50). */
+export const DEFAULT_SERVICE_PRICE_PAISE = 5000;
+
+/**
+ * Default length of a `slot` service card, in minutes. A `question` card has
+ * no length, so its `durationMinutes` stays 0. Matches the `slotDurationMinutes`
+ * column default, so a card that has not been edited advertises the same length
+ * the booking engine will actually reserve.
+ */
+export const DEFAULT_SERVICE_DURATION_MINUTES = 30;
+
 export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
   design: {
     primaryColor: { type: "color", default: "#771609" },
@@ -383,11 +394,14 @@ export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
             // bookable slot. A slot service must be booked (date + time), a
             // question service is sent straight to the astrologer.
             type: { type: "select", options: ["question", "slot"], default: "question" },
-            // Per-service override. 0 means "charge my standard price", so
-            // services saved before this field existed keep working.
-            pricePaise: { type: "number", min: 0, default: 0 },
+            // Per-service override. The field default is what a fresh card gets
+            // (see DEFAULT_SERVICE_PRICE_PAISE); 0 still means "charge my
+            // standard price", so services saved before this field existed keep
+            // working.
+            pricePaise: { type: "number", min: 0, default: DEFAULT_SERVICE_PRICE_PAISE },
             // Only meaningful for slot services. 0 means "use my standard slot
-            // length".
+            // length" - which is also what keeps a card from advertising a
+            // length the booking engine will not honour.
             durationMinutes: { type: "number", min: 0, max: 240, default: 0 },
           },
           default: [
@@ -395,22 +409,22 @@ export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
               title: "Birth Chart Reading",
               body: "Understand your unique birth chart, planetary influences, strengths, challenges, and important life patterns through a personalized Vedic astrology reading.",
               type: "slot",
-              pricePaise: 0,
-              durationMinutes: 60,
+              pricePaise: DEFAULT_SERVICE_PRICE_PAISE,
+              durationMinutes: DEFAULT_SERVICE_DURATION_MINUTES,
             },
             {
               title: "Career & Finance",
               body: "Gain insights into your career path, professional opportunities, financial patterns, and favorable periods for making important decisions.",
               type: "question",
-              pricePaise: 0,
+              pricePaise: DEFAULT_SERVICE_PRICE_PAISE,
               durationMinutes: 0,
             },
             {
               title: "Marriage & Relationships",
               body: "Explore relationship compatibility, marriage prospects, partnership patterns, and planetary influences affecting your personal relationships.",
               type: "slot",
-              pricePaise: 0,
-              durationMinutes: 45,
+              pricePaise: DEFAULT_SERVICE_PRICE_PAISE,
+              durationMinutes: DEFAULT_SERVICE_DURATION_MINUTES,
             },
           ],
         },
@@ -639,7 +653,7 @@ export const DEFAULT_TEMPLATE_SCHEMA: TemplateSchema = {
         },
         copyright: {
           type: "text",
-          default: "© 2026 by Astro Guide. All rights reserved.",
+          default: "© 2027 by Astro Guide. All rights reserved.",
         },
       },
     },
@@ -695,6 +709,62 @@ export async function getDefaultRenderableTemplate() {
   return db.websiteTemplate.findFirst({ where: { isActive: true } });
 }
 
+/**
+ * A site needs at least one service card, and a card's price and length have to
+ * come from somewhere. These are the two things an astrologer can sell, so they
+ * are what a fresh card is seeded from when the astrologer has none: a live
+ * session at the default price and length, and a written question at the default
+ * price with no length.
+ *
+ * Sharing DEFAULT_SERVICE_PRICE_PAISE / DEFAULT_SERVICE_DURATION_MINUTES with
+ * the template schema keeps the two paths identical - a new astrologer, who gets
+ * the schema's cards, and one who deleted every card of their own, end up with
+ * the same numbers.
+ */
+export function defaultServiceCards(): Record<string, unknown>[] {
+  return [
+    {
+      title: "Live Session",
+      body: "A one-to-one astrology session over a call, booked for a time that suits you.",
+      type: "slot",
+      pricePaise: DEFAULT_SERVICE_PRICE_PAISE,
+      durationMinutes: DEFAULT_SERVICE_DURATION_MINUTES,
+    },
+    {
+      title: "Written Question",
+      body: "Send your question and get a considered, written answer.",
+      type: "question",
+      pricePaise: DEFAULT_SERVICE_PRICE_PAISE,
+      durationMinutes: 0,
+    },
+  ];
+}
+
+/**
+ * Guarantee the Services section has at least one card. The document is returned
+ * unchanged when the astrologer already has cards, so this never overwrites work
+ * they have done.
+ *
+ * This runs inside buildSite so the checkout path (resolveService) resolves the
+ * exact same cards the site renders; seeding anywhere else would let a client
+ * pick a card that priced as a different service.
+ */
+export function ensureDefaultServices(site: SiteDocument): SiteDocument {
+  const index = site.sections.findIndex((s) => s.type === "ServicesSection");
+  if (index === -1) return site;
+
+  const section = site.sections[index] as SiteSectionDoc;
+  const items = section.props?.["items"];
+  if (Array.isArray(items) && items.length > 0) return site;
+
+  const sections = [...site.sections];
+  sections[index] = {
+    ...section,
+    props: { ...section.props, items: defaultServiceCards() },
+  };
+  return { ...site, sections };
+}
+
 export async function buildSite(profile: {
   templateId: string | null;
   templateData: unknown;
@@ -705,7 +775,7 @@ export async function buildSite(profile: {
   if (!template) throw new Error("No website template available");
 
   const schema = getTemplateSchema(template);
-  const site = mergeTemplate(schema, profile.templateData);
+  const site = ensureDefaultServices(mergeTemplate(schema, profile.templateData));
   return { template, schema, site };
 }
 

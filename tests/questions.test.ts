@@ -475,6 +475,32 @@ describe("batch question order", () => {
     }
   });
 
+  test("the chat thread exposes the client's birth details", async () => {
+    const qid = batchQuestionIds[0]!;
+    const thread = await api("GET", `/questions/${qid}/messages`, {
+      token: astrologer.accessToken,
+    });
+    expect(thread.status).toBe(200);
+    const body = await json<{
+      question: {
+        id: string;
+        clientDetails?: {
+          clientName?: string;
+          birthDate?: string;
+          birthTime?: string;
+          birthPlace?: string;
+        } | null;
+      };
+    }>(thread);
+    expect(body.question.id).toBe(qid);
+    expect(body.question.clientDetails).toEqual({
+      clientName: "Asha Sharma",
+      birthDate: "1990-05-14",
+      birthTime: "06:30",
+      birthPlace: "Mumbai, India",
+    });
+  });
+
   test("settling again is idempotent", async () => {
     const again = await api("POST", `/payments/${paymentId}/complete`, { token: buyerToken });
     expect(again.status).toBe(200);

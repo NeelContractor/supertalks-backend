@@ -254,6 +254,10 @@ model AvailabilityException {
   @@map("availability_exceptions")
 }
 
+/// Overlaps between Confirmed/Rescheduled bookings are additionally guarded
+/// by the `bookings_no_overlap` exclusion constraint created in migration
+/// 20261008_booking_double_entry_guards - Prisma cannot express it here, and
+/// it is what ultimately guarantees no double booking under concurrency.
 model Booking {
   id                 String        @id @default(uuid()) @db.Uuid
   clientId           String        @map("client_id") @db.Uuid
@@ -268,6 +272,10 @@ model Booking {
   clientDetails      Json?         @map("client_details")
   cancelledBy        String?       @map("cancelled_by")
   cancellationReason String?       @map("cancellation_reason")
+  idempotencyKey     String?       @map("idempotency_key")
+  /// When set (PendingPayment rows only), the slot is held from other clients
+  /// until this instant. Cleared on confirmation, released on payment failure.
+  holdExpiresAt      DateTime?     @map("hold_expires_at")
   createdAt          DateTime      @default(now()) @map("created_at")
   updatedAt          DateTime      @updatedAt @map("updated_at")
 
@@ -275,6 +283,8 @@ model Booking {
   astrologer AstrologerProfile @relation("AstrologerBookings", fields: [astrologerId], references: [id])
   payment    Payment?          @relation(fields: [paymentId], references: [id])
 
+  @@unique([clientId, idempotencyKey])
+  @@index([astrologerId, startAt])
   @@map("bookings")
 }
 

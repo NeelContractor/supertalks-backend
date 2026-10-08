@@ -47,8 +47,23 @@ async function getQuestion(id: string | string[] | undefined) {
           user: { select: { name: true } },
         },
       },
+      // Birth/identity details the client supplied at checkout, so the chat
+      // window can show them to the astrologer (and to the client themselves).
+      payment: { select: { clientDetails: true } },
     },
   });
+}
+
+/**
+ * Question → JSON shape used by the read endpoints: flattens the payment's
+ * `clientDetails` onto the question (same as GET /questions already does) so
+ * both the list and the chat thread carry it consistently.
+ */
+function describeQuestion(
+  question: NonNullable<Awaited<ReturnType<typeof getQuestion>>>
+) {
+  const { payment, ...rest } = question;
+  return { ...rest, clientDetails: payment?.clientDetails ?? null };
 }
 
 async function getAstrologerProfileId(userId: string) {
@@ -493,7 +508,7 @@ router.get("/:id", requireAuth, async (req, res) => {
       return res.status(403).json({ error: "Not allowed to view this question" });
     }
 
-    return res.json({ question });
+    return res.json({ question: describeQuestion(question) });
   } catch (err) {
     console.error("Get question error:", err);
     return res.status(500).json({ error: "Internal server error" });
@@ -724,7 +739,7 @@ router.get("/:id/messages", requireAuth, async (req, res) => {
     }
 
     const messages = await listMessages(question.id);
-    return res.json({ question, messages });
+    return res.json({ question: describeQuestion(question), messages });
   } catch (err) {
     console.error("List question messages error:", err);
     return res.status(500).json({ error: "Internal server error" });
@@ -824,7 +839,7 @@ router.post("/:id/messages", requireAuth, async (req, res) => {
           amountPaise: payment.amountPaise,
           currency: payment.currency,
         },
-        question,
+        question: describeQuestion(question),
       });
     }
 
@@ -842,7 +857,7 @@ router.post("/:id/messages", requireAuth, async (req, res) => {
     await broadcastMessage(question.id, message.id);
     await broadcastQuestionUpdate(question.id);
 
-    return res.status(201).json({ message, question: updated });
+    return res.status(201).json({ message, question: describeQuestion(updated) });
   } catch (err) {
     console.error("Send question message error:", err);
     return res.status(500).json({ error: "Internal server error" });

@@ -1,6 +1,10 @@
 import { test, expect, afterAll, beforeAll, describe } from "bun:test";
 import { db } from "../prisma/db";
-import { ensureDefaultTemplates, resolveService } from "../src/lib/site";
+import {
+  DEFAULT_SERVICE_PRICE_PAISE,
+  ensureDefaultTemplates,
+  resolveService,
+} from "../src/lib/site";
 import {
   api,
   cleanupUsers,
@@ -258,7 +262,9 @@ describe("slot service pricing", () => {
 
 describe("services saved before the per-service fields existed", () => {
   // A stored service only has title/body. buildSite must fill the new fields
-  // from the template defaults so existing astrologers keep working.
+  // from the template defaults so existing astrologers keep working. A missing
+  // price takes the default card price rather than 0, and a missing length
+  // stays 0 so a card never advertises a session length on a question.
   // Built lazily: `astro` only exists once beforeAll has run.
   const legacy = () => ({
     templateId: astro.profile.templateId,
@@ -276,13 +282,13 @@ describe("services saved before the per-service fields existed", () => {
     },
   });
 
-  test("a legacy service resolves with a type and a profile-price fallback", async () => {
+  test("a legacy service resolves with a type and the default card price", async () => {
     expect(await resolveService(legacy(), "services:0")).toEqual({
       serviceId: "services:0",
       index: 0,
       title: "Legacy Q",
       type: "question",
-      pricePaise: 0,
+      pricePaise: DEFAULT_SERVICE_PRICE_PAISE,
       durationMinutes: 0,
     });
   });

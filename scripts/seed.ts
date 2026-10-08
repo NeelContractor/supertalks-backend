@@ -332,6 +332,19 @@ async function seed() {
   let totalQuestions = 0;
   const createdClientIds: string[] = [];
 
+  // The database refuses overlapping Confirmed/Rescheduled bookings for one
+  // astrologer (bookings_no_overlap exclusion constraint), so seed data has to
+  // respect it too: track already-placed blocking bookings - including ones
+  // from previous seed runs - and re-roll collisions.
+  const existingBlocking = await db.booking.findMany({
+    where: {
+      astrologerId: profile.id,
+      status: { in: [BookingStatus.Confirmed, BookingStatus.Rescheduled] },
+    },
+    select: { startAt: true, endAt: true },
+  });
+  const blockingRanges = existingBlocking.map((b) => ({ start: b.startAt, end: b.endAt }));
+
   for (let i = 0; i < opts.clients; i++) {
     const client = await createClient(i);
     createdClientIds.push(client.id);
@@ -340,26 +353,46 @@ async function seed() {
     // Create bookings
     for (let j = 0; j < opts.bookings; j++) {
       const status = bookingStatuses[(i * opts.bookings + j) % bookingStatuses.length];
-      let startAt: Date;
+      const blocksSlot =
+        status === BookingStatus.Confirmed || status === BookingStatus.Rescheduled;
 
-      // Vary dates: past completed, today's confirmed, future pending
-      if (status === BookingStatus.Completed) {
-        startAt = daysFromNow(-Math.floor(Math.random() * 30 + 1));
-      } else if (status === BookingStatus.Confirmed) {
-        startAt = hoursFromNow(Math.floor(Math.random() * 48 + 1));
-      } else if (
-        status === BookingStatus.CancelledByClient ||
-        status === BookingStatus.CancelledByAstrologer ||
-        status === BookingStatus.NoShowClient ||
-        status === BookingStatus.NoShowAstrologer
-      ) {
-        startAt = daysFromNow(-Math.floor(Math.random() * 15 + 1));
-      } else {
-        startAt = daysFromNow(Math.floor(Math.random() * 14 + 1));
+      const rollStart = (): Date => {
+        let startAt: Date;
+
+        // Vary dates: past completed, today's confirmed, future pending
+        if (status === BookingStatus.Completed) {
+          startAt = daysFromNow(-Math.floor(Math.random() * 30 + 1));
+        } else if (status === BookingStatus.Confirmed) {
+          startAt = hoursFromNow(Math.floor(Math.random() * 48 + 1));
+        } else if (
+          status === BookingStatus.CancelledByClient ||
+          status === BookingStatus.CancelledByAstrologer ||
+          status === BookingStatus.NoShowClient ||
+          status === BookingStatus.NoShowAstrologer
+        ) {
+          startAt = daysFromNow(-Math.floor(Math.random() * 15 + 1));
+        } else {
+          startAt = daysFromNow(Math.floor(Math.random() * 14 + 1));
+        }
+
+        // Round to nearest 30 min
+        startAt.setMinutes(Math.round(startAt.getMinutes() / 30) * 30, 0, 0);
+        return startAt;
+      };
+
+      const overlapsBlocking = (startAt: Date) => {
+        const endAt = new Date(startAt.getTime() + profile.slotDurationMinutes * 60000);
+        return blockingRanges.some((r) => r.start < endAt && r.end > startAt);
+      };
+
+      let startAt = rollStart();
+      for (let attempt = 0; attempt < 10 && blocksSlot && overlapsBlocking(startAt); attempt++) {
+        startAt = rollStart();
       }
-
-      // Round to nearest 30 min
-      startAt.setMinutes(Math.round(startAt.getMinutes() / 30) * 30, 0, 0);
+      if (blocksSlot && overlapsBlocking(startAt)) {
+        console.log(`  Skipped a ${status} booking: no free slot left in range`);
+        continue;
+      }
 
       const bookingData = createBookingData(
         client.id,
@@ -369,6 +402,13 @@ async function seed() {
         status,
         startAt,
       );
+
+      if (blocksSlot) {
+        blockingRanges.push({
+          start: startAt,
+          end: new Date(startAt.getTime() + profile.slotDurationMinutes * 60000),
+        });
+      }
 
       await db.booking.create({ data: bookingData as any });
       totalBookings++;
